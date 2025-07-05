@@ -16,7 +16,7 @@ from collections import deque, defaultdict, Counter
 import os
 import gc
 
-from text_processing import ALL_STOPWORDS, is_low_content, replace_repeats, most_common_words
+from text_processing import ALL_STOPWORDS, is_low_content, replace_repeats
 
 # ----------------------
 # Dataset
@@ -36,7 +36,6 @@ def clean_dataframe(df, remove_low_content=True):
     if remove_low_content:
         mask = ~df['text'].apply(is_low_content)
         df = df[mask].reset_index(drop=True)
-    # df = df[df['final'] >= 3].reset_index(drop=True) # for some testing
     # print(f"Rows after cleaning: {len(df)}")
     # print(df['final'].value_counts().sort_index())
     return df
@@ -114,6 +113,33 @@ def get_collate_fn(tokenizer, max_length=8192): # max_length <= context window o
             'question_type': question_types
         }
     return collate_fn
+
+class GatedFF(nn.Module):
+    def __init__(self, input_dim, output_dim=64, dropout=0.1, v_activation=nn.GELU(), g_activation=None, use_norm=True, use_bias=True):
+        super().__init__()
+        self.value_proj = nn.Linear(input_dim, output_dim, bias=use_bias)
+        self.gate_proj = nn.Linear(input_dim, output_dim, bias=use_bias)
+        self.use_norm = use_norm
+        if use_norm:
+            self.norm = nn.LayerNorm(output_dim, bias=use_bias)
+        self.v_activation = v_activation
+        self.g_activation = g_activation
+        if dropout > 0.0:
+            self.dropout = nn.Dropout(dropout)
+
+    def forward(self, hidden_states):
+        v = self.value_proj(hidden_states)                 # [B, T, output_dim]
+        if self.v_activation is not None:
+            v = self.v_activation(v)
+        g = self.gate_proj(hidden_states)
+        if self.g_activation is not None:
+            g = self.g_activation(g)
+        x = v * g                                          # gated interaction
+        if self.use_norm:
+            x = self.norm(x)                               # normalize gated output
+        if self.dropout: 
+            x = self.dropout(x)
+        return x                                           # [B, T, output_dim]
     
 class AttentionPooling(nn.Module):
     def __init__(self, hidden_dim, expected_seq_len=32, attn_proj=None, dropout=None):
@@ -260,6 +286,25 @@ class ESLGradingModel(nn.Module):
         )
         model.load_state_dict(checkpoint['model_state_dict'])
         return model
+
+class WarmupInverseSquareScheduler(_LRScheduler):
+    def __init__(self, optimizer, warmup_steps, total_steps, last_epoch=-1):
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+        super().__init__(optimizer, last_epoch)
+    
+    def get_lr(self):
+        step = max(1, self.last_epoch)  # avoid div by zero
+        
+        if step < self.warmup_steps:
+            # Linear warmup
+            warmup_factor = step / self.warmup_steps
+            return [base_lr * warmup_factor for base_lr in self.base_lrs]
+        else:
+            # Inverse square decay after warmup
+            decay_step = step - self.warmup_steps + 1
+            decay_factor = 1.0 / (decay_step ** 0.5)
+            return [base_lr * decay_factor for base_lr in self.base_lrs]  
         
 def maybe_empty_cache(threshold=0.93):
     if torch.cuda.is_available():
@@ -270,6 +315,255 @@ def maybe_empty_cache(threshold=0.93):
                 torch.cuda.empty_cache()
         except Exception:
             torch.cuda.empty_cache()
+
+# ---- ESLTrainer ----
+class ESLTrainer:
+    def __init__(
+        self,
+        train_path,
+        val_path,
+        test_path,
+        model,
+        tokenizer,
+        batch_size=16,
+        epochs=3,
+        lr=2e-5,
+        optimizer=None,
+        scheduler=None,
+        std=0.25  # for Gaussian label smoothing
+    ):
+        self.train_path = train_path
+        self.val_path = val_path
+        self.test_path = test_path
+        self.batch_size = batch_size
+        self.epochs = epochs
+        self.lr = lr
+        self.std = std  # Gaussian smoothing std
+
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.tokenizer = tokenizer
+        self.model = model.to(self.device)
+        self.criterion = nn.KLDivLoss(reduction='batchmean')  # use with log_softmax + soft targets
+
+        self.optimizer = optimizer if optimizer is not None else torch.optim.AdamW(
+            self.model.parameters(), lr=self.lr, weight_decay=1e-4
+        )
+        self.scheduler = scheduler
+
+        self._prepare_data()
+
+    def _prepare_data(self):
+        train_df = pd.read_csv(self.train_path)
+        val_df = pd.read_csv(self.val_path)
+        test_df = pd.read_csv(self.test_path)
+
+        collate_fn = get_collate_fn(self.tokenizer)
+
+        train_dataset = ESLDataset(train_df)
+        train_sampler = InverseScoreSampler(train_dataset)
+        self.train_loader = DataLoader(
+            train_dataset,
+            batch_size=self.batch_size,
+            sampler=train_sampler,
+            collate_fn=collate_fn
+        )
+
+        self.val_loader = DataLoader(
+            ESLDataset(val_df),
+            batch_size=self.batch_size,
+            collate_fn=collate_fn
+        )
+
+        self.test_loader = DataLoader(
+            ESLDataset(test_df),
+            batch_size=self.batch_size,
+            collate_fn=collate_fn
+        )
+
+    def _create_soft_targets(self, scores, std=None):
+        """
+        Generate soft target distributions using a truncated Gaussian centered on each score.
+        Preserves expected value even near edges (0.0 or 10.0).
+        
+        Args:
+            scores (torch.Tensor): shape (B,), scalar scores in [0, 10]
+            std (float): Gaussian standard deviation. Defaults to self.std.
+
+        Returns:
+            torch.Tensor: shape (B, 21), soft label distributions over 21 bins from 0 to 10.
+        """
+        if std is None:
+            std = self.std
+
+        # Convert to NumPy
+        scores_np = scores.cpu().numpy()  # shape (B,)
+        B = scores_np.shape[0]
+
+        # Define bin centers: 0.0 to 10.0 in 0.5 steps (21 bins)
+        bin_centers = np.linspace(0, 10, 21)  # shape (21,)
+
+        # Prepare output array
+        soft_labels = np.zeros((B, 21), dtype=np.float32)
+
+        for i, score in enumerate(scores_np):
+            a = (0.0 - score) / std
+            b = (10.0 - score) / std
+            dist = truncnorm(a, b, loc=score, scale=std)
+            probs = dist.pdf(bin_centers)
+            probs /= probs.sum()  # Normalize to make it a valid distribution
+            soft_labels[i] = probs
+
+        # Convert back to torch tensor
+        return torch.from_numpy(soft_labels).to(scores.device)  # shape (B, 21)
+
+    def train(self):
+        scaler = amp.GradScaler('cuda')
+        best_val_loss = float('inf')
+        best_state_dict = None
+
+        for epoch in range(self.epochs):
+            self.model.train()
+            total_loss = 0.0
+            total_batches = 0
+
+            for batch in tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}"):
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                question_type = batch['question_type'].to(self.device)
+                true_scores = batch['score'].to(self.device)
+
+                soft_targets = self._create_soft_targets(true_scores)  # (B, 21)
+
+                with amp.autocast('cuda'):
+                    outputs = self.model(input_ids, attention_mask)
+                    logits = outputs['logits']  # (B, 21)
+                    log_probs = F.log_softmax(logits, dim=-1)
+
+                    loss = self.criterion(log_probs, soft_targets)
+
+                self.optimizer.zero_grad()
+                scaler.scale(loss).backward()
+                scaler.step(self.optimizer)
+                scaler.update()
+                if self.scheduler is not None:
+                    self.scheduler.step()
+
+                total_loss += loss.item()
+                total_batches += 1
+
+            avg_loss = total_loss / total_batches
+            print(f"Epoch {epoch + 1}: Train KLDiv Loss = {avg_loss:.4f}")
+
+            val_w_loss, val_avg_loss = self.validate()
+            print(f"Epoch {epoch + 1}: Validation MSE: weighted = {val_w_loss:.4f}, average = {val_avg_loss:.4f}")
+
+            if val_w_loss < best_val_loss:
+                best_val_loss = val_w_loss
+                best_state_dict = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
+            elif val_w_loss > best_val_loss * 1.05:
+                self.model.load_state_dict(best_state_dict)
+                print("Current model is too bad; reloading best validation model.")
+
+            torch.cuda.empty_cache()
+            gc.collect()
+
+        if best_state_dict is not None:
+            self.model.load_state_dict(best_state_dict)
+            print("Loaded best model state from validation.")
+
+    def validate(self, alpha=0.5):
+        self.model.eval()
+        total_loss = 0.0
+        total_weight = 0.0  # use weights sum for normalization
+        total_per_item_loss = 0.0
+        total_count = 0
+
+        with torch.no_grad():
+            for batch in self.val_loader:
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                question_type = batch['question_type'].to(self.device)
+                true_scores = batch['score'].to(self.device)  # (B,)
+
+                outputs = self.model(input_ids, attention_mask)
+                pred_scores = outputs['expected_score']  # (B,)
+
+                # Calculate frequency of each score in batch
+                unique_scores, counts = torch.unique(true_scores, return_counts=True)
+                freq_map = {score.item(): count.item() for score, count in zip(unique_scores, counts)}
+
+                # Compute inverse frequency weights with smoothing
+                weights = torch.tensor(
+                    [((1.0 / freq_map[score.item()]) ** alpha) for score in true_scores],
+                    device=self.device
+                )
+
+                # Compute weighted MSE loss per example
+                per_example_loss = (pred_scores - true_scores) ** 2
+                weighted_loss = (weights * per_example_loss).sum().item()
+
+                total_loss += weighted_loss
+                total_weight += weights.sum().item()
+                total_per_item_loss += per_example_loss.sum().item()
+                total_count += input_ids.size(0)
+
+        torch.cuda.empty_cache()
+        weighted_avg = total_loss / total_weight if total_weight > 0 else 0.0
+        per_item_avg = total_per_item_loss / total_count if total_count > 0 else 0.0
+        return weighted_avg, per_item_avg
+
+    def test(self):
+        self.model.eval()
+        total_loss = 0.0
+        total_mae = 0.0
+        count = 0
+
+        with torch.no_grad():
+            for batch in tqdm(self.test_loader, desc="Testing"):
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                question_type = batch['question_type'].to(self.device)
+                true_scores = batch['score'].to(self.device)
+
+                outputs = self.model(input_ids, attention_mask)
+                pred_scores = outputs['expected_score']  # (B,)
+
+                total_loss += F.mse_loss(pred_scores, true_scores, reduction='sum').item()
+                total_mae += torch.abs(pred_scores - true_scores).sum().item()
+                count += input_ids.size(0)
+
+        avg_loss = total_loss / count
+        avg_mae = total_mae / count
+
+        print(f"Test MSE: {avg_loss:.4f}")
+        print(f"Test MAE: {avg_mae:.4f}")
+
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    def get_test_loader(self):
+        return self.test_loader
+    
+def get_param_groups(model, base_lr=1e-5, encoder_lr=1e-6, scale_lr=1e-3):
+    special_params = []
+    encoder_params = []
+    base_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if 'scale' in name or 'alpha' in name:
+            special_params.append(param)
+        elif name.startswith('encoder.'):
+            encoder_params.append(param)
+        else:
+            base_params.append(param)
+
+    return [
+        {'params': base_params, 'lr': base_lr},
+        {'params': encoder_params, 'lr': encoder_lr},
+        {'params': special_params, 'lr': scale_lr}
+    ]
 
 def selective_freeze_embedding_layer(model, tokenizer, unfrozen_words):
     """
@@ -314,324 +608,14 @@ def selective_freeze_embedding_layer(model, tokenizer, unfrozen_words):
         return grad * grad_mask
 
     embedding_layer.weight.register_hook(hook_fn)
-
-
-def get_class_counts_from_dataframe(df, class_bins):
-    """
-    Returns counts for each class bin (length = len(class_bins))
-    """
-    class_to_index = {v: i for i, v in enumerate(class_bins)}
-    indices = df['final'].map(class_to_index)
-    counts = np.zeros(len(class_bins), dtype=int)
-    for idx in indices:
-        counts[idx] += 1
-    return counts
-
-def get_effective_number_weights(class_counts, beta=0.9999):
-    """
-    Implements Cui et al. (2019) class-balanced loss weights
-    """
-    effective_num = 1.0 - np.power(beta, class_counts)
-    weights = (1.0 - beta) / effective_num
-    weights = weights / np.mean(weights)  # normalize to mean 1
-    return torch.tensor(weights, dtype=torch.float32)
-
-# ---- ESLTrainer ----
-class ESLTrainer:
-    def __init__(
-        self,
-        train_path,
-        val_path,
-        test_path,
-        model,
-        tokenizer,
-        batch_size=16,
-        epochs=3,
-        lr=2e-5,
-        optimizer=None,
-        scheduler=None,
-        std=0.3
-    ):
-        self.train_path = train_path
-        self.val_path = val_path
-        self.test_path = test_path
-        self.batch_size = batch_size
-        self.epochs = epochs
-        self.lr = lr
-        self.std = std  # Gaussian smoothing std
-
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.tokenizer = tokenizer
-        self.model = model.to(self.device)
-        self.criterion = nn.KLDivLoss(reduction='batchmean')  # use with log_softmax + soft targets
-
-        self.optimizer = optimizer if optimizer is not None else torch.optim.AdamW(
-            self.model.parameters(), lr=self.lr, weight_decay=1e-4
-        )
-        self.scheduler = scheduler
-
-        self._prepare_data()
-
-    def _prepare_data(self):
-        train_df = pd.read_csv(self.train_path)
-        val_df = pd.read_csv(self.val_path)
-        test_df = pd.read_csv(self.test_path)
-
-        collate_fn = get_collate_fn(self.tokenizer)
-
-        sampling_alpha = 0.5    
-        train_dataset = ESLDataset(train_df)
-        train_sampler = InverseScoreSampler(train_dataset, alpha=sampling_alpha)
-        self.train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.batch_size,
-            sampler=train_sampler,
-            collate_fn=collate_fn
-        )
-        class_bins = [i * 0.5 for i in range(21)]  # 0.0 to 10.0 in steps of 0.5
-        class_counts = get_class_counts_from_dataframe(train_df, class_bins)
-        eff_class_counts = (class_counts + 1) ** (1 - sampling_alpha) # compensate for the sampler; plus one to avoid zeros
-        self.loss_weights = get_effective_number_weights(eff_class_counts, beta=0.99).to(self.device)
-        self.train_logits = np.log(eff_class_counts)
-
-        self.val_loader = DataLoader(
-            ESLDataset(val_df),
-            batch_size=self.batch_size,
-            collate_fn=collate_fn
-        )
-
-        self.test_loader = DataLoader(
-            ESLDataset(test_df),
-            batch_size=self.batch_size,
-            collate_fn=collate_fn
-        )
-
-    def _create_soft_targets(self, scores, std=None):
-        """
-        Generate soft target distributions using a truncated Gaussian centered on each score.
-        Slightly skews expected values to the center on edges (0.0 or 10.0).
-        
-        Args:
-            scores (torch.Tensor): shape (B,), scalar scores in [0, 10]
-            std (float): Gaussian standard deviation. Defaults to self.std.
-
-        Returns:
-            torch.Tensor: shape (B, 21), soft label distributions over 21 bins from 0 to 10.
-        """
-        if std is None:
-            std = self.std
-
-        # Convert to NumPy
-        scores_np = scores.cpu().numpy()  # shape (B,)
-        B = scores_np.shape[0]
-
-        # Define bin centers: 0.0 to 10.0 in 0.5 steps (21 bins)
-        bin_centers = np.linspace(0, 10, 21)  # shape (21,)
-
-        # Prepare output array
-        soft_labels = np.zeros((B, 21), dtype=np.float32)
-
-        for i, score in enumerate(scores_np):
-            # Scale std based on distance from center (5.0)
-            scaled_std = std + random.uniform(-0.05, 0.05)
-
-            # Define truncated Gaussian
-            a = (0.0 - score) / scaled_std
-            b = (10.0 - score) / scaled_std
-            dist = truncnorm(a, b, loc=score, scale=scaled_std)
-
-            # Get normalized probabilities
-            probs = dist.pdf(bin_centers)
-            probs /= probs.sum()  # Normalize
-
-            soft_labels[i] = probs
-
-        # Convert back to torch tensor
-        return torch.from_numpy(soft_labels).to(scores.device)  # shape (B, 21)
-
-    def train(self):
-        scaler = amp.GradScaler('cuda')
-        best_val_loss = float('inf')
-        best_state_dict = None
-        
-        # Lambdas
-        lambda_kl = 0.9
-        lambda_mse = 0.1
-
-        stopwords = ALL_STOPWORDS.union(most_common_words(pd.read_csv(self.train_path), 0.05))
-        selective_freeze_embedding_layer(self.model.encoder, self.tokenizer, stopwords)
-
-        for epoch in range(self.epochs):
-            self.model.train()
-            total_kl_loss = 0.0
-            total_mse_loss = 0.0
-            total_loss = 0.0
-            total_batches = 0
-
-            for batch in tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}"):
-                input_ids = batch['input_ids'].to(self.device)
-                attention_mask = batch['attention_mask'].to(self.device)
-                question_type = batch['question_type'].to(self.device)
-                true_scores = batch['score'].to(self.device)
-
-                soft_targets = self._create_soft_targets(true_scores)  # (B, 21)
-
-                with amp.autocast('cuda'):
-                    outputs = self.model(input_ids, attention_mask)
-                
-                target_indexes = (true_scores * 2).long().clamp(0, 20)  # 0.0->0, 0.5->1, ..., 10.0->20
-                weights = self.loss_weights[target_indexes]
-
-                # KL loss between predicted log probs and soft targets
-                logits = outputs['logits']  # (B, 21)
-                log_probs = F.log_softmax(logits, dim=-1)
-                kl_loss_per_sample = F.kl_div(log_probs, soft_targets, reduction='none').sum(dim=-1) # (B,)
-                weighted_kl_loss = (kl_loss_per_sample * weights).sum() / weights.sum()
-
-                # MSE Loss, weighted so that points farther from center contribute more
-                pred_scores = outputs['expected_score']  # (B,)
-                mse_loss_per_sample = F.mse_loss(pred_scores, true_scores, reduction='none')  # (B,)
-                weighted_mse = (mse_loss_per_sample * weights).sum() / weights.sum()
-                # Combine losses
-                loss = lambda_kl * weighted_kl_loss + lambda_mse * weighted_mse
-
-                self.optimizer.zero_grad()
-                scaler.scale(loss).backward()
-                scaler.step(self.optimizer)
-                scaler.update()
-                if self.scheduler is not None:
-                    self.scheduler.step()
-
-                total_kl_loss += weighted_kl_loss.item()
-                total_mse_loss += weighted_mse.item()
-                total_loss += loss.item()
-                total_batches += 1
-
-            avg_kl_loss = total_kl_loss / total_batches
-            avg_mse_loss = total_mse_loss / total_batches
-            avg_loss = total_loss / total_batches
-            print(f"Epoch {epoch + 1}: Train KLDiv Loss = {avg_kl_loss:.4f}, Weighted MSE Loss = {avg_mse_loss:.4f}, Total Loss = {avg_loss:.4f}")
-
-            val_w_loss, val_avg_loss = self.validate()
-            print(f"Epoch {epoch + 1}: Validation MSE: weighted = {val_w_loss:.4f}, average = {val_avg_loss:.4f}")
-
-            if val_w_loss < best_val_loss:
-                best_val_loss = val_w_loss
-                best_state_dict = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
-            elif val_w_loss > best_val_loss * 1.1:
-                self.model.load_state_dict(best_state_dict)
-                print("Current model is too bad; reloading best validation model.")
-
-            torch.cuda.empty_cache()
-            gc.collect()
-
-        if best_state_dict is not None:
-            self.model.load_state_dict(best_state_dict)
-            print("Loaded best model state from validation.")
-
-    def validate(self, alpha=0.5):
-        self.model.eval()
-        total_loss = 0.0
-        total_weight = 0.0  # use weights sum for normalization
-        total_per_item_loss = 0.0
-        total_count = 0
-
-        with torch.no_grad():
-            for batch in self.val_loader:
-                input_ids = batch['input_ids'].to(self.device)
-                attention_mask = batch['attention_mask'].to(self.device)
-                question_type = batch['question_type'].to(self.device)
-                true_scores = batch['score'].to(self.device)  # (B,)
-
-                with amp.autocast('cuda'):
-                    outputs = self.model(input_ids, attention_mask)
-                    pred_scores = outputs['expected_score']  # (B,)
-
-                # Calculate frequency of each score in batch
-                unique_scores, counts = torch.unique(true_scores, return_counts=True)
-                freq_map = {score.item(): count.item() for score, count in zip(unique_scores, counts)}
-
-                # Compute inverse frequency weights with smoothing
-                weights = torch.tensor(
-                    [((1.0 / freq_map[score.item()]) ** alpha) for score in true_scores],
-                    device=self.device
-                )
-
-                # Compute weighted MSE loss per example
-                per_example_loss = (pred_scores - true_scores) ** 2
-                weighted_loss = (weights * per_example_loss).sum().item()
-
-                total_loss += weighted_loss
-                total_weight += weights.sum().item()
-                total_per_item_loss += per_example_loss.sum().item()
-                total_count += input_ids.size(0)
-
-        torch.cuda.empty_cache()
-        weighted_avg = total_loss / total_weight if total_weight > 0 else 0.0
-        per_item_avg = total_per_item_loss / total_count if total_count > 0 else 0.0
-        return weighted_avg, per_item_avg
-
-    def test(self):
-        self.model.eval()
-        total_loss = 0.0
-        total_mae = 0.0
-        count = 0
-
-        with torch.no_grad():
-            for batch in tqdm(self.test_loader, desc="Testing"):
-                input_ids = batch['input_ids'].to(self.device)
-                attention_mask = batch['attention_mask'].to(self.device)
-                question_type = batch['question_type'].to(self.device)
-                true_scores = batch['score'].to(self.device)
-
-                with amp.autocast('cuda'):
-                    outputs = self.model(input_ids, attention_mask)
-                    pred_scores = outputs['expected_score']  # (B,)
-
-                total_loss += F.mse_loss(pred_scores, true_scores, reduction='sum').item()
-                total_mae += torch.abs(pred_scores - true_scores).sum().item()
-                count += input_ids.size(0)
-
-        avg_loss = total_loss / count
-        avg_mae = total_mae / count
-
-        print(f"Test MSE: {avg_loss:.4f}")
-        print(f"Test MAE: {avg_mae:.4f}")
-
-        torch.cuda.empty_cache()
-        gc.collect()
-
-    def get_test_loader(self):
-        return self.test_loader
     
-def get_param_groups(model, base_lr=1e-5, encoder_lr=1e-6, scale_lr=1e-3):
-    special_params = []
-    encoder_params = []
-    base_params = []
-
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if 'scale' in name or 'alpha' in name:
-            special_params.append(param)
-        elif name.startswith('encoder.'):
-            encoder_params.append(param)
-        else:
-            base_params.append(param)
-
-    return [
-        {'params': base_params, 'lr': base_lr},
-        {'params': encoder_params, 'lr': encoder_lr},
-        {'params': special_params, 'lr': scale_lr}
-    ]
-
 if __name__ == "__main__":
     model = ESLGradingModel(model_name='Alibaba-NLP/gte-multilingual-base', pooling_dropout=0.3, regression_dropout=0.5)
     tokenizer = AutoTokenizer.from_pretrained('Alibaba-NLP/gte-multilingual-base')
 
     train_df = pd.read_csv("./data/train_pro.csv")
     batch_size = 16
-    epochs = 20
+    epochs = 10
     steps_per_epoch = len(train_df) // batch_size
     total_steps = steps_per_epoch * epochs
     warmup_steps = 1000

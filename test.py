@@ -14,53 +14,23 @@ from sklearn.decomposition import PCA
 from scipy.spatial.distance import pdist, squareform
 from scipy.stats import spearmanr, pearsonr
 
-def model_test(model, tokenizer, sample_path, test_path, batch_size=16, k=32, k_exclude=4, device='cuda'):
+def model_test(model, tokenizer, test_path, batch_size=16, device='cuda'):
     model.eval()
 
-    # 1. Sample k exemplars from sampling file
-    sample_df = pd.read_csv(sample_path)
-    bins = np.linspace(0, 10, num=21)
-    sample_df['score_bin'] = pd.cut(sample_df['final'], bins=bins, labels=False)
-    grouped = sample_df.groupby('score_bin')
-    sampled_df = grouped.apply(lambda x: x.sample(n=min(len(x), max(1, k // len(bins))), random_state=42), include_groups=False)
-    sampled_df = sampled_df.reset_index(drop=True)
-
-    remaining_k = k - len(sampled_df)
-    if remaining_k > 0:
-        extra_samples = sample_df.sample(n=remaining_k, random_state=42)
-        sampled_df = pd.concat([sampled_df, extra_samples], ignore_index=True)
-
-    # 2. Load sampled exemplar embeddings
-    sampled_dataset = ESLDataset(sampled_df)
-    collate_fn = get_collate_fn(tokenizer)
-    sampled_loader = DataLoader(sampled_dataset, batch_size=batch_size, collate_fn=collate_fn)
-
-    ref_vecs_list = []
-    score_ref_list = []
-    with torch.no_grad():
-        for sample_batch in sampled_loader:
-            input_ids_ref = sample_batch['input_ids'].to(device)
-            attention_mask_ref = sample_batch['attention_mask'].to(device)
-            question_type_ref = sample_batch['question_type'].to(device)
-            score_ref = sample_batch['score'].to(device)
-            vecs = model.encode(input_ids_ref, attention_mask_ref, question_type_ref)
-            ref_vecs_list.append(vecs)
-            score_ref_list.append(score_ref)
-
-    ref_vecs = torch.cat(ref_vecs_list, dim=0)  # [k, d]
-    score_ref = torch.cat(score_ref_list, dim=0)  # [k]
-
-    # 3. Evaluate on test file
+    # 1. Load test file
     test_df = pd.read_csv(test_path).reset_index(drop=True)
     test_dataset = ESLDataset(test_df)
+    collate_fn = get_collate_fn(tokenizer)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn)
 
     total_loss = 0.0
     total_mae = 0.0
+    total_delta = 0.0
     total_count = 0
 
     binwise_mse = defaultdict(float)
     binwise_mae = defaultdict(float)
+    binwise_delta = defaultdict(float)
     binwise_count = defaultdict(int)
 
     with torch.no_grad():
@@ -70,43 +40,47 @@ def model_test(model, tokenizer, sample_path, test_path, batch_size=16, k=32, k_
             question_type = batch['question_type'].to(device)
             true_scores = batch['score'].to(device)
 
-            batch_vecs = model.encode(input_ids, attention_mask, question_type)  # [B, d]
-            deltas = model.reg_head(batch_vecs[:, None, :] - ref_vecs[None, :, :]).squeeze(-1)  # [B, k]
-            pred_scores = (score_ref.unsqueeze(0) + deltas) # [B, k]
+            out = model(input_ids, attention_mask)
+            pred_scores = out['expected_score']
 
-            # Trim top-k and bottom-k
-            if pred_scores.size(1) > 2 * k_exclude:
-                sorted_preds, _ = torch.sort(pred_scores, dim=1)
-                trimmed = sorted_preds[:, k_exclude:-k_exclude]
-                avg_pred_trimmed = trimmed.mean(dim=1).clamp(0, 10) 
-            else:
-                avg_pred_trimmed = pred_scores.mean(dim=1).clamp(0, 10) 
-
-            mse_batch = F.mse_loss(avg_pred_trimmed, true_scores, reduction='none')
-            mae_batch = torch.abs(avg_pred_trimmed - true_scores)
+            mse_batch = F.mse_loss(pred_scores, true_scores, reduction='none')
+            mae_batch = torch.abs(pred_scores - true_scores)
+            delta_batch = pred_scores - true_scores
 
             total_loss += mse_batch.sum().item()
             total_mae += mae_batch.sum().item()
+            total_delta += delta_batch.sum().item()
             total_count += input_ids.size(0)
 
             for i in range(input_ids.size(0)):
                 score_bin = round(float(true_scores[i].item()) * 2) / 2  # bin size 0.5
                 binwise_mse[score_bin] += mse_batch[i].item()
                 binwise_mae[score_bin] += mae_batch[i].item()
+                binwise_delta[score_bin] += delta_batch[i].item()
                 binwise_count[score_bin] += 1
 
-    print(f"\nOverall Test MSE: {total_loss / total_count:.4f}")
-    print(f"Overall Test MAE: {total_mae / total_count:.4f}")
-
-    print("\nPer-Score MSE / MAE:")
+    print("\nPer-Score MSE / MAE / Avg Delta:")
+    mse_list = []
+    mae_list = []
     for b in sorted(binwise_count):
         n = binwise_count[b]
         if n > 0:
             mse_avg = binwise_mse[b] / n
             mae_avg = binwise_mae[b] / n
-            print(f"Score {b:.1f}: MSE = {mse_avg:.4f}, MAE = {mae_avg:.4f}")
+            delta_avg = binwise_delta[b] / n
+            mse_list.append(mse_avg)
+            mae_list.append(mae_avg)
+            print(f"Score {b:.1f}: MSE = {mse_avg:.4f}, MAE = {mae_avg:.4f}, Avg Delta = {delta_avg:.4f}")
 
-def run_examples(model, tokenizer, sample_path, test_path, num_examples=64, batch_size=16, k=32, k_exclude=4, device='cuda'):
+    print("\n---Summary---")
+    print(f"Overall Test MSE: {total_loss / total_count:.4f}")
+    print(f"Overall Test MAE: {total_mae / total_count:.4f}")
+    print(f"Overall Test Avg Delta: {total_delta / total_count:.4f}")
+    if mse_list and mae_list:
+        print(f"Average MSE over all bins: {np.mean(mse_list):.4f}")
+        print(f"Average MAE over all bins: {np.mean(mae_list):.4f}")
+
+def run_examples(model, tokenizer, test_path, num_examples=64, batch_size=16, device='cuda'):
     # 1. Load test data and preserve audio_path
     sample_df = pd.read_csv(test_path).reset_index()
     bins = np.linspace(0, 10, num=21)
@@ -133,46 +107,14 @@ def run_examples(model, tokenizer, sample_path, test_path, num_examples=64, batc
 
     example_audio_paths = examples_df['audio_path'].tolist()
 
-    # 2. Sample k exemplars from sample_path
-    sample_train_df = pd.read_csv(sample_path)
-    sample_train_df['score_bin'] = pd.cut(sample_train_df['final'], bins=bins, labels=False)
-    grouped_train = sample_train_df.groupby('score_bin')
-    sampled_df = grouped_train.apply(
-        lambda x: x.sample(n=min(len(x), max(1, k // len(bins))), random_state=42),
-        include_groups=False
-    ).reset_index(drop=True)
-
-    remaining_k = k - len(sampled_df)
-    if remaining_k > 0:
-        extra_samples = sample_train_df.sample(n=remaining_k, random_state=42)
-        sampled_df = pd.concat([sampled_df, extra_samples], ignore_index=True)
-
-    # 3. Encode exemplar vectors
-    sampled_dataset = ESLDataset(sampled_df)
-    collate_fn = get_collate_fn(tokenizer)
-    sampled_loader = DataLoader(sampled_dataset, batch_size=batch_size, collate_fn=collate_fn)
-
-    ref_vecs_list = []
-    score_ref_list = []
-    with torch.no_grad():
-        for sample_batch in sampled_loader:
-            input_ids_ref = sample_batch['input_ids'].to(device)
-            attention_mask_ref = sample_batch['attention_mask'].to(device)
-            question_type_ref = sample_batch['question_type'].to(device)
-            score_ref = sample_batch['score'].to(device)
-            vecs = model.encode(input_ids_ref, attention_mask_ref, question_type_ref)
-            ref_vecs_list.append(vecs)
-            score_ref_list.append(score_ref)
-
-    ref_vecs = torch.cat(ref_vecs_list, dim=0)
-    score_ref = torch.cat(score_ref_list, dim=0)
-
-    # 4. Predict on sampled test examples
+    # 2. Predict on sampled test examples using model.forward
     examples_dataset = ESLDataset(examples_df)
+    collate_fn = get_collate_fn(tokenizer)
     examples_loader = DataLoader(examples_dataset, batch_size=batch_size, collate_fn=collate_fn)
 
     all_true = []
     all_pred = []
+    all_probs = []
 
     with torch.no_grad():
         for batch in examples_loader:
@@ -181,29 +123,24 @@ def run_examples(model, tokenizer, sample_path, test_path, num_examples=64, batc
             question_type = batch['question_type'].to(device)
             true_scores = batch['score'].to(device)
 
-            batch_vecs = model.encode(input_ids, attention_mask, question_type)
-            deltas = model.reg_head(batch_vecs[:, None, :] - ref_vecs[None, :, :]).squeeze(-1)
-            pred_scores = (score_ref.unsqueeze(0) + deltas)
-
-            if pred_scores.size(1) > 2 * k_exclude:
-                sorted_preds, _ = torch.sort(pred_scores, dim=1)
-                trimmed = sorted_preds[:, k_exclude:-k_exclude]
-                avg_pred_trimmed = trimmed.mean(dim=1).clamp(0, 10) 
-            else:
-                avg_pred_trimmed = pred_scores.mean(dim=1).clamp(0, 10) 
+            out = model(input_ids, attention_mask)
+            pred_scores = out['expected_score']
+            probs = out['probs']
 
             all_true.extend(true_scores.cpu().numpy())
-            all_pred.extend(avg_pred_trimmed.cpu().numpy())
+            all_pred.extend(pred_scores.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
 
-    # 5. Output results with audio_path
+
+    # 3. Output results with audio_path
     original_test_df = pd.read_csv(test_path)
     print("\nSampled Examples (True vs Predicted):")
-    for orig_idx, t, p in zip(original_indices, all_true, all_pred):
+    for orig_idx, t, p, probs in zip(original_indices, all_true, all_pred, all_probs):
         audio_path = original_test_df.loc[orig_idx, 'audio_path']
         diff = t - p
-        print(f"{audio_path}: True = {t:.2f}, Pred = {p:.2f}, Diff = {diff:.2f}")
+        print(f"{audio_path}: True = {t:.2f}, Pred = {p:.2f}, Diff = {diff:.2f}, Probs = {probs}")
 
-def visualize_pooling(model, tokenizer, sample_path, device='cpu'):
+def visualize_pooling(model, tokenizer, sample_path, device='cuda'):
     # Take some examples from sample_path, encode, and visualize attention scores in attention pooling
     df = pd.read_csv(sample_path).sample(n=1)
     dataset = ESLDataset(df)
@@ -219,7 +156,7 @@ def visualize_pooling(model, tokenizer, sample_path, device='cpu'):
 
             # Forward pass to get encoder outputs and attention scores
             # Assume model.encode returns (pooled, attn_scores) if visualize=True
-            pooled, attn_scores = model.encode(input_ids, attention_mask, question_type, visualize=True)
+            pooled, attn_scores = model.encode(input_ids, attention_mask, visualize=True)
             attn_scores = attn_scores.squeeze()  # Remove all singleton dimensions
             attn_scores = attn_scores.cpu().numpy()
             if attn_scores.ndim > 1:
@@ -239,7 +176,7 @@ def visualize_pooling(model, tokenizer, sample_path, device='cpu'):
 
             print("Pooled Representation Vector", pooled)
 
-def visualize_encoding(model, tokenizer, sample_path, num_examples=256, device='cpu'):
+def visualize_encoding(model, tokenizer, sample_path, num_examples=256, device='cuda'):
     # Take num_examples examples, encode them, and visualize scores and encodings in 2D
 
     df = pd.read_csv(sample_path).sample(n=num_examples)
@@ -256,7 +193,7 @@ def visualize_encoding(model, tokenizer, sample_path, num_examples=256, device='
             attention_mask = batch['attention_mask'].to(device)
             question_type = batch['question_type'].to(device)
             scores = batch['score'].cpu().numpy()
-            vecs = model.encode(input_ids, attention_mask, question_type)
+            vecs = model.encode(input_ids, attention_mask)
             if isinstance(vecs, tuple):  # If model.encode returns (vecs, attn_scores)
                 vecs = vecs[0]
             all_vecs.append(vecs.cpu().numpy())
@@ -326,7 +263,7 @@ def visualize_encoding_distributions(model, tokenizer, paths, device='cpu'):
                 attention_mask = batch['attention_mask'].to(device)
                 question_type = batch['question_type'].to(device)
                 score = batch['score'].cpu().numpy()
-                out = model.encode(input_ids, attention_mask, question_type)
+                out = model.encode(input_ids, attention_mask)
                 if isinstance(out, tuple):
                     out = out[0]
                 vecs.append(out.cpu().numpy())
@@ -379,8 +316,8 @@ train_path = "./data/train_pro.csv"
 val_path = "./data/val_pro.csv"
 test_path = "./data/test_pro.csv"
 
-# model_test(model, tokenizer, train_path, test_path, device=device)
-# run_examples(model, tokenizer, train_path, test_path, device=device)
-visualize_pooling(model, tokenizer, sample_path=test_path, device=device)
-visualize_encoding(model, tokenizer, sample_path=test_path, device=device)
+model_test(model, tokenizer, test_path, device=device)
+# run_examples(model, tokenizer, test_path, device=device)
+# visualize_pooling(model, tokenizer, sample_path=test_path, device=device)
+# visualize_encoding(model, tokenizer, sample_path=test_path, device=device)
 # visualize_encoding_distributions(model, tokenizer, [train_path, val_path, test_path], device=device)

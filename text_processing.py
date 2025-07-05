@@ -3,6 +3,10 @@ from typing import List, Set
 
 import nltk
 from nltk.corpus import stopwords
+from collections import Counter
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+
 
 # Base English stop‑words (includes pronouns, articles, auxiliaries…)
 NLTK_STOPWORDS: Set[str] = set(stopwords.words("english"))
@@ -69,9 +73,9 @@ def replace_repeats(text: str, k: int = 3, tag: str = "") -> str:
 
     while i < n:
         replaced = False
-        max_L = (n - i) // (k + 1)
+        max_L = (n - i) // k
 
-        for L in range(1, max_L):
+        for L in range(1, max_L + 1):
             seq = non_ws_tokens[i : i + L]
             count = 1
             while i + (count + 1) * L <= n and non_ws_tokens[i + count * L : i + (count + 1) * L] == seq:
@@ -105,21 +109,39 @@ def replace_repeats(text: str, k: int = 3, tag: str = "") -> str:
                 while token_idx < len(tokens) and tokens[token_idx].isspace():
                     out_tokens.append(tokens[token_idx])
                     token_idx += 1
+    
+    if token_idx < len(tokens):
+        out_tokens.extend(tokens[token_idx:])
 
     return "".join(out_tokens)
 
+def most_common_words(df, proportion=0.1, verbose=False):
+    """
+    Print the most common `proportion` of words in df['text'], sorted descending by document frequency.
+    Each word is counted at most once per row.
+    Removes punctuation and stopwords.
+    """
+
+    vectorizer = TfidfVectorizer(tokenizer=tokenize, lowercase=True)
+    tfidf_matrix = vectorizer.fit_transform(df['text'])
+
+    # Compute mean TF-IDF for each word across all docs
+    means = tfidf_matrix.mean(axis=0).A1  # convert to flat array
+    vocab = vectorizer.get_feature_names_out()
+
+    tfidf_scores = list(zip(vocab, means))
+    tfidf_scores.sort(key=lambda x: x[1], reverse=True)
+
+    n_show = max(1, int(len(tfidf_scores) * proportion))
+    top_words = tfidf_scores[:n_show]
+
+    if verbose:
+        for word, score in top_words:
+            print(f"{word}: {score:.4f}")
+
+    return [word for word, _ in top_words]
 
 if __name__ == "__main__":
-    examples = [
-        "you you you you you you you you you",
-        "Public . . . . .",
-        "Today I went to the market and bought apples and oranges. They were very delicious.",
-        "Thank you. ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ..."
-    ]
-
-    for t in examples:
-        cw = count_content_words(t)
-        flag = is_low_content(t)
-        print(f"Transcript: {t!r}")
-        print(f"  Content words: {cw}")
-        print(f"  Low-content? {flag}\n")
+    text = "Thank you. Thank you. Thank you. Thank you. Thank you. Thank you. Thank you. Thank you. Thank you."
+    print(replace_repeats(text, 2, "[REPEAT]"))
+    print(is_low_content(replace_repeats(text, 2, "[REPEAT]")))
