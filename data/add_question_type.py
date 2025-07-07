@@ -2,7 +2,7 @@ import pandas as pd
 import os
 
 # List of CSV files to process
-csv_files = ['train_pro.csv', 'test_pro.csv', 'val_pro.csv']
+csv_files = ['/media/gpus/Data/AES/ESL-Grading/data/Full/train_pro.csv', '/media/gpus/Data/AES/ESL-Grading/data/Full/test_pro.csv', '/media/gpus/Data/AES/ESL-Grading/data/Full/val_pro.csv']
 
 for csv_file in csv_files:
     # Read the CSV file

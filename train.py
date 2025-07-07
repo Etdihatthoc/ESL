@@ -15,9 +15,10 @@ import random
 from collections import deque, defaultdict, Counter
 import os
 import gc
-
+import nltk
+nltk.download('stopwords')
 from text_processing import ALL_STOPWORDS, is_low_content, replace_repeats, most_common_words
-
+from transformers import Wav2Vec2Model
 # ----------------------
 # Dataset
 # ----------------------
@@ -182,6 +183,15 @@ class ESLGradingModel(nn.Module):
             nn.Linear(256, 1, bias=False)
         )
         self.attn_pool = AttentionPooling(hidden_size, attn_proj=self.attn_proj, expected_seq_len=512, dropout=pooling_dropout)
+
+        
+        # Thêm sau phần encoder hiện tại
+        self.audio_encoder = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h")
+        self.audio_hidden_dim = self.audio_encoder.config.output_hidden_size  # 768
+
+        # Audio projection để match với text feature dimension
+        self.audio_proj = nn.Linear(self.audio_hidden_dim, self.encoder.config.hidden_size)
+        self.audio_norm = nn.LayerNorm(self.encoder.config.hidden_size)
 
         # Regression head
         self.reg_head = nn.Sequential(
