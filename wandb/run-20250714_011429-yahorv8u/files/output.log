@@ -1,0 +1,112 @@
+Some weights of the model checkpoint at Alibaba-NLP/gte-multilingual-base were not used when initializing NewModel: ['classifier.bias', 'classifier.weight']
+- This IS expected if you are initializing NewModel from the checkpoint of a model trained on another task or with another architecture (e.g. initializing a BertForSequenceClassification model from a BertForPreTraining model).
+- This IS NOT expected if you are initializing NewModel from the checkpoint of a model that you expect to be exactly identical (initializing a BertForSequenceClassification model from a BertForSequenceClassification model).
+train_wAudio.py:547: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load(path, map_location='cpu')
+Some weights of the model checkpoint at Alibaba-NLP/gte-multilingual-base were not used when initializing NewModel: ['classifier.bias', 'classifier.weight']
+- This IS expected if you are initializing NewModel from the checkpoint of a model trained on another task or with another architecture (e.g. initializing a BertForSequenceClassification model from a BertForPreTraining model).
+- This IS NOT expected if you are initializing NewModel from the checkpoint of a model that you expect to be exactly identical (initializing a BertForSequenceClassification model from a BertForSequenceClassification model).
+After score filtering: 5919 samples
+Score distribution: 3.0     396
+3.5     284
+4.0     916
+4.5     317
+5.0     946
+5.5     290
+6.0     951
+6.5     265
+7.0     599
+7.5     145
+8.0     468
+8.5     214
+9.0     108
+9.5      14
+10.0      6
+Name: grammar, dtype: int64
+After score filtering: 797 samples
+Score distribution: 3.0     54
+3.5     33
+4.0    131
+4.5     49
+5.0    141
+5.5     40
+6.0    146
+6.5     39
+7.0     76
+7.5     22
+8.0     41
+8.5     17
+9.0      8
+Name: grammar, dtype: int64
+After score filtering: 1592 samples
+Score distribution: 3.0    103
+3.5     77
+4.0    254
+4.5     77
+5.0    308
+5.5     87
+6.0    258
+6.5     78
+7.0    168
+7.5     40
+8.0     95
+8.5     32
+9.0     13
+9.5      2
+Name: grammar, dtype: int64
+Training Epoch 1:   0%|                                                                                                                                                                                                  | 0/987 [00:00<?, ?it/s]/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/utils/checkpoint.py:295: FutureWarning: `torch.cpu.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cpu', args...)` instead.
+  with torch.enable_grad(), device_autocast_ctx, torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):  # type: ignore[attr-defined]
+Training Epoch 1:   0%|▎                                                                                                                                                                                       | 2/987 [00:26<3:35:53, 13.15s/it]
+Traceback (most recent call last):
+  File "train_wAudio.py", line 1397, in <module>
+    trainer.train()
+  File "train_wAudio.py", line 1007, in train
+    outputs = self.model(input_ids, attention_mask, audio)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "train_wAudio.py", line 509, in forward
+    audio_features = self.encode_audio(audio)
+  File "train_wAudio.py", line 452, in encode_audio
+    out = self.audio_encoder(input_values=inp).last_hidden_state
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/transformers/models/wav2vec2/modeling_wav2vec2.py", line 1810, in forward
+    extract_features = self.feature_extractor(input_values)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/transformers/models/wav2vec2/modeling_wav2vec2.py", line 464, in forward
+    hidden_states = conv_layer(hidden_states)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/transformers/models/wav2vec2/modeling_wav2vec2.py", line 336, in forward
+    hidden_states = self.layer_norm(hidden_states)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/normalization.py", line 202, in forward
+    return F.layer_norm(
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/functional.py", line 2576, in layer_norm
+    return torch.layer_norm(input, normalized_shape, weight, bias, eps, torch.backends.cudnn.enabled)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.10 GiB. GPU 0 has a total capacity of 10.75 GiB of which 932.75 MiB is free. Including non-PyTorch memory, this process has 9.83 GiB memory in use. Of the allocated memory 9.55 GiB is allocated by PyTorch, and 80.35 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Error in atexit._run_exitfuncs:
+Traceback (most recent call last):
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/utils/data/dataloader.py", line 1471, in _clean_up_worker
+    w.join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/multiprocessing/process.py", line 149, in join
+    res = self._popen.wait(timeout)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/multiprocessing/popen_fork.py", line 44, in wait
+    if not wait([self.sentinel], timeout):
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/multiprocessing/connection.py", line 931, in wait
+    ready = selector.select(timeout)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/selectors.py", line 415, in select
+    fd_event_list = self._selector.poll(timeout)
+KeyboardInterrupt

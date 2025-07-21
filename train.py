@@ -15,17 +15,16 @@ import random
 from collections import deque, defaultdict, Counter
 import os
 import gc
-import nltk
-nltk.download('stopwords')
+
 from text_processing import ALL_STOPWORDS, is_low_content, replace_repeats, most_common_words
-from transformers import Wav2Vec2Model
+
 # ----------------------
 # Dataset
 # ----------------------
 import torch
 from torch.utils.data import Dataset
 
-def clean_dataframe(df, remove_low_content=True):
+def clean_dataframe(df, remove_low_content=True, filter_scores=True):
     """
     Cleans the dataframe by processing the 'text' field:
     - Applies replace_repeats
@@ -37,14 +36,23 @@ def clean_dataframe(df, remove_low_content=True):
     if remove_low_content:
         mask = ~df['text'].apply(is_low_content)
         df = df[mask].reset_index(drop=True)
-    # df = df[df['final'] >= 3].reset_index(drop=True) # for some testing
-    # print(f"Rows after cleaning: {len(df)}")
-    # print(df['final'].value_counts().sort_index())
+    if filter_scores:
+        score_column = 'grammar' if 'grammar' in df.columns else 'final'
+        mask = (
+            # (df[score_column] < 3) |  # Điểm < 3
+            # (df[score_column] % 1 == 0.5) |  # Điểm lẻ .5
+            # (df[score_column] > 8)  # Điểm > 8
+            (df[score_column] >= 3) 
+        )
+        df = df[mask].reset_index(drop=True)
+        print(f"After score filtering: {len(df)} samples")
+        print(f"Score distribution: {df[score_column].value_counts().sort_index()}")
+
     return df
 
 class ESLDataset(Dataset):
     def __init__(self, dataframe, remove_low_content=True):
-        dataframe = clean_dataframe(dataframe, remove_low_content)
+        dataframe = clean_dataframe(dataframe, remove_low_content, filter_scores=True)
         self.text_prefix = "The following is a spoken English response by a non-native speaker. Grade the fluency, grammar, vocabulary, pronunciation, and content based on the transcript below:"
         self.question_type_map = {
             1: "Answer some questions about you personally.",
@@ -52,7 +60,7 @@ class ESLDataset(Dataset):
             3: "Give your opinion about a topic."
         }
         self.question_types = dataframe['question_type'].astype(int).tolist()
-        self.scores = dataframe['final'].astype(float).tolist()
+        self.scores = dataframe['grammar'].astype(float).tolist()
         raw_texts = dataframe['text'].tolist()
         self.texts = [
             f"{self.text_prefix} [Question Type: {self.question_type_map.get(qtype, '')}] {t[2:-1]}"
@@ -183,15 +191,6 @@ class ESLGradingModel(nn.Module):
             nn.Linear(256, 1, bias=False)
         )
         self.attn_pool = AttentionPooling(hidden_size, attn_proj=self.attn_proj, expected_seq_len=512, dropout=pooling_dropout)
-
-        
-        # Thêm sau phần encoder hiện tại
-        self.audio_encoder = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h")
-        self.audio_hidden_dim = self.audio_encoder.config.output_hidden_size  # 768
-
-        # Audio projection để match với text feature dimension
-        self.audio_proj = nn.Linear(self.audio_hidden_dim, self.encoder.config.hidden_size)
-        self.audio_norm = nn.LayerNorm(self.encoder.config.hidden_size)
 
         # Regression head
         self.reg_head = nn.Sequential(
@@ -325,13 +324,12 @@ def selective_freeze_embedding_layer(model, tokenizer, unfrozen_words):
 
     embedding_layer.weight.register_hook(hook_fn)
 
-
 def get_class_counts_from_dataframe(df, class_bins):
     """
     Returns counts for each class bin (length = len(class_bins))
     """
     class_to_index = {v: i for i, v in enumerate(class_bins)}
-    indices = df['final'].map(class_to_index)
+    indices = df['grammar'].map(class_to_index)
     counts = np.zeros(len(class_bins), dtype=int)
     for idx in indices:
         counts[idx] += 1
@@ -462,6 +460,7 @@ class ESLTrainer:
     def train(self):
         scaler = amp.GradScaler('cuda')
         best_val_loss = float('inf')
+        best_val_mae = float('inf')
         best_state_dict = None
         
         # Lambdas
@@ -476,6 +475,7 @@ class ESLTrainer:
             total_kl_loss = 0.0
             total_mse_loss = 0.0
             total_loss = 0.0
+            total_mae = 0.0
             total_batches = 0
 
             for batch in tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}"):
@@ -503,6 +503,7 @@ class ESLTrainer:
                 mse_loss_per_sample = F.mse_loss(pred_scores, true_scores, reduction='none')  # (B,)
                 weighted_mse = (mse_loss_per_sample * weights).sum() / weights.sum()
                 # Combine losses
+                mae_loss = torch.abs(pred_scores - true_scores).mean()
                 loss = lambda_kl * weighted_kl_loss + lambda_mse * weighted_mse
 
                 self.optimizer.zero_grad()
@@ -515,16 +516,21 @@ class ESLTrainer:
                 total_kl_loss += weighted_kl_loss.item()
                 total_mse_loss += weighted_mse.item()
                 total_loss += loss.item()
+                total_mae += mae_loss.item()
                 total_batches += 1
 
             avg_kl_loss = total_kl_loss / total_batches
             avg_mse_loss = total_mse_loss / total_batches
             avg_loss = total_loss / total_batches
-            print(f"Epoch {epoch + 1}: Train KLDiv Loss = {avg_kl_loss:.4f}, Weighted MSE Loss = {avg_mse_loss:.4f}, Total Loss = {avg_loss:.4f}")
-
-            val_w_loss, val_avg_loss = self.validate()
-            print(f"Epoch {epoch + 1}: Validation MSE: weighted = {val_w_loss:.4f}, average = {val_avg_loss:.4f}")
-
+            avg_mae = total_mae / total_batches
+            log_message = f"Epoch {epoch + 1}: Train KLDiv Loss = {avg_kl_loss:.4f}, Weighted MSE Loss = {avg_mse_loss:.4f}, Total Loss = {avg_loss:.4f}, MAE = {avg_mae:.4f}"
+            print(log_message)
+            
+            val_w_loss, val_avg_loss,val_mae = self.validate()
+            
+            val_log_message = f"Epoch {epoch + 1}: Validation MSE: weighted = {val_w_loss:.4f}, average = {val_avg_loss:.4f}, MAE = {val_mae:.4f}"
+            print(val_log_message)
+            
             if val_w_loss < best_val_loss:
                 best_val_loss = val_w_loss
                 best_state_dict = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
@@ -545,6 +551,7 @@ class ESLTrainer:
         total_weight = 0.0  # use weights sum for normalization
         total_per_item_loss = 0.0
         total_count = 0
+        total_mae = 0.0
 
         with torch.no_grad():
             for batch in self.val_loader:
@@ -571,15 +578,20 @@ class ESLTrainer:
                 per_example_loss = (pred_scores - true_scores) ** 2
                 weighted_loss = (weights * per_example_loss).sum().item()
 
+                mae_batch = torch.abs(pred_scores - true_scores).sum().item()
+                
                 total_loss += weighted_loss
                 total_weight += weights.sum().item()
                 total_per_item_loss += per_example_loss.sum().item()
+                total_mae += mae_batch 
                 total_count += input_ids.size(0)
 
         torch.cuda.empty_cache()
         weighted_avg = total_loss / total_weight if total_weight > 0 else 0.0
         per_item_avg = total_per_item_loss / total_count if total_count > 0 else 0.0
-        return weighted_avg, per_item_avg
+        mae_avg = total_mae / total_count if total_count > 0 else 0.0 
+        
+        return weighted_avg, per_item_avg,mae_avg
 
     def test(self):
         self.model.eval()
@@ -636,15 +648,19 @@ def get_param_groups(model, base_lr=1e-5, encoder_lr=1e-6, scale_lr=1e-3):
     ]
 
 if __name__ == "__main__":
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
     model = ESLGradingModel(model_name='Alibaba-NLP/gte-multilingual-base', pooling_dropout=0.3, regression_dropout=0.5)
+    #model = ESLGradingModel.load("/media/gpus/Data/AES/best_avg.pth").to(device)
     tokenizer = AutoTokenizer.from_pretrained('Alibaba-NLP/gte-multilingual-base')
 
-    train_df = pd.read_csv("./data/train_pro.csv")
-    batch_size = 16
-    epochs = 20
+    train_df = pd.read_csv("/media/gpus/Data/AES/ESL-Grading/data/Full/Full_train_aug.csv")
+    batch_size = 48
+    epochs = 30
     steps_per_epoch = len(train_df) // batch_size
     total_steps = steps_per_epoch * epochs
-    warmup_steps = 1000
+    warmup_steps = 500
 
     param_groups = get_param_groups(model, base_lr=1e-4, encoder_lr=1e-5, scale_lr=1e-3)
     optimizer = torch.optim.AdamW(param_groups)
@@ -656,7 +672,7 @@ if __name__ == "__main__":
     )
 
     trainer = ESLTrainer(
-        train_path="./data/train_pro.csv",
+        train_path="/media/gpus/Data/AES/ESL-Grading/data/Full/Full_train_aug.csv",
         test_path="./data/test_pro.csv",
         val_path="./data/val_pro.csv",
         model=model,
@@ -669,4 +685,4 @@ if __name__ == "__main__":
 
     trainer.train()
     trainer.test()
-    trainer.model.save("./model/model.pth")
+    trainer.model.save("./model/model_grammar.pth")

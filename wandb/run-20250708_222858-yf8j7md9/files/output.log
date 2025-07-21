@@ -1,0 +1,87 @@
+Some weights of the model checkpoint at Alibaba-NLP/gte-multilingual-base were not used when initializing NewModel: ['classifier.bias', 'classifier.weight']
+- This IS expected if you are initializing NewModel from the checkpoint of a model trained on another task or with another architecture (e.g. initializing a BertForSequenceClassification model from a BertForPreTraining model).
+- This IS NOT expected if you are initializing NewModel from the checkpoint of a model that you expect to be exactly identical (initializing a BertForSequenceClassification model from a BertForSequenceClassification model).
+train_wAudio.py:1206: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load(checkpoint_path, map_location='cpu')
+Successfully loaded pretrained Wav2Vec2 encoder from /mnt/disk1/SonDinh/SonDinh/AES_project/speech-score-api_W2V/models/ckpt_pronunciation/ckpt_SWA_pronunciation_wav2vec2model.pth
+Loaded 422 audio encoder parameters
+Training Epoch 1:   0%|                                                                                                                                                                                           | 0/969 [00:00<?, ?it/s]/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/utils/checkpoint.py:295: FutureWarning: `torch.cpu.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cpu', args...)` instead.
+  with torch.enable_grad(), device_autocast_ctx, torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):  # type: ignore[attr-defined]
+Training Epoch 1:   0%|▏                                                                                                                                                                                | 1/969 [00:36<9:54:23, 36.84s/it]
+Traceback (most recent call last):
+  File "train_wAudio.py", line 1269, in <module>
+    trainer.train()
+  File "train_wAudio.py", line 990, in train
+    outputs = self.model(input_ids, attention_mask, audio)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "train_wAudio.py", line 495, in forward
+    audio_features = self.encode_audio(audio)
+  File "train_wAudio.py", line 439, in encode_audio
+    out = self.audio_encoder(input_values=inp).last_hidden_state
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/transformers/models/wav2vec2/modeling_wav2vec2.py", line 1810, in forward
+    extract_features = self.feature_extractor(input_values)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/transformers/models/wav2vec2/modeling_wav2vec2.py", line 464, in forward
+    hidden_states = conv_layer(hidden_states)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/transformers/models/wav2vec2/modeling_wav2vec2.py", line 336, in forward
+    hidden_states = self.layer_norm(hidden_states)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/modules/normalization.py", line 202, in forward
+    return F.layer_norm(
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/nn/functional.py", line 2576, in layer_norm
+    return torch.layer_norm(input, normalized_shape, weight, bias, eps, torch.backends.cudnn.enabled)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.10 GiB. GPU 0 has a total capacity of 10.75 GiB of which 286.75 MiB is free. Including non-PyTorch memory, this process has 10.45 GiB memory in use. Of the allocated memory 9.56 GiB is allocated by PyTorch, and 709.03 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Error in atexit._run_exitfuncs:
+Traceback (most recent call last):
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/utils/data/dataloader.py", line 1471, in _clean_up_worker
+    w.join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/multiprocessing/process.py", line 149, in join
+    res = self._popen.wait(timeout)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/multiprocessing/popen_fork.py", line 44, in wait
+    if not wait([self.sentinel], timeout):
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/multiprocessing/connection.py", line 931, in wait
+    ready = selector.select(timeout)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/selectors.py", line 415, in select
+    fd_event_list = self._selector.poll(timeout)
+KeyboardInterrupt
+Error in atexit._run_exitfuncs:
+Traceback (most recent call last):
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/utils/data/dataloader.py", line 1471, in _clean_up_worker
+    w.join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/multiprocessing/process.py", line 149, in join
+    res = self._popen.wait(timeout)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/multiprocessing/popen_fork.py", line 44, in wait
+    if not wait([self.sentinel], timeout):
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/multiprocessing/connection.py", line 931, in wait
+    ready = selector.select(timeout)
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/selectors.py", line 415, in select
+    fd_event_list = self._selector.poll(timeout)
+KeyboardInterrupt
+Error in atexit._run_exitfuncs:
+Traceback (most recent call last):
+  File "/mnt/disk1/anaconda3/envs/dinhson/lib/python3.8/site-packages/torch/_dynamo/utils.py", line 127, in tabulate
+    import tabulate
+  File "<frozen importlib._bootstrap>", line 991, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 975, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 671, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 839, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 971, in get_code
+  File "<frozen importlib._bootstrap_external>", line 640, in _compile_bytecode
+KeyboardInterrupt

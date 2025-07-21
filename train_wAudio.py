@@ -17,6 +17,7 @@ from collections import deque, defaultdict, Counter
 import os
 import gc
 import nltk
+#nltk.download('stopwords')
 import asyncio
 from text_processing import ALL_STOPWORDS, is_low_content, replace_repeats, most_common_words
 from transformers import Wav2Vec2Model
@@ -34,6 +35,10 @@ import librosa
 # ----------------------
 # Audio Processing Functions (from your provided code)
 # ----------------------
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
+wandb.login(key='072fb112587c6b4507f5ec59e575d234c3e22649', relogin=True)
 
 async def preprocess_audio_wav2vec(absolute_path, processor, sample_rate=16000, num_chunks=10, chunk_length_sec=30):
     """
@@ -99,7 +104,7 @@ def fixed_chunk_audio(audio, sr, num_chunks=10, chunk_length_sec=30):
         chunks.append(chunk)
     return chunks
 
-def clean_dataframe(df, remove_low_content=True):
+def clean_dataframe(df, remove_low_content=True, filter_scores=True):
     """
     Cleans the dataframe by processing the 'text' field:
     - Applies replace_repeats
@@ -114,10 +119,21 @@ def clean_dataframe(df, remove_low_content=True):
     # df = df[df['final'] >= 3].reset_index(drop=True) # for some testing
     # print(f"Rows after cleaning: {len(df)}")
     # print(df['final'].value_counts().sort_index())
+    if filter_scores:
+        score_column = 'grammar' if 'grammar' in df.columns else 'final'
+        mask = (
+            # (df[score_column] < 3) |  # Điểm < 3
+            # (df[score_column] % 1 == 0.5) |  # Điểm lẻ .5
+            # (df[score_column] > 8)  # Điểm > 8
+            (df[score_column] >= 3) 
+        )
+        df = df[mask].reset_index(drop=True)
+        print(f"After score filtering: {len(df)} samples")
+        print(f"Score distribution: {df[score_column].value_counts().sort_index()}")
     return df
 class ESLDataset(Dataset):
     def __init__(self, dataframe, remove_low_content=True):
-        dataframe = clean_dataframe(dataframe, remove_low_content)
+        dataframe = clean_dataframe(dataframe, remove_low_content, filter_scores = True)
         self.text_prefix = "The following is a spoken English response by a non-native speaker. Grade the fluency, grammar, vocabulary, pronunciation, and content based on the transcript below:"
         self.question_type_map = {
             1: "Answer some questions about you personally.",
@@ -125,7 +141,7 @@ class ESLDataset(Dataset):
             3: "Give your opinion about a topic."
         }
         self.question_types = dataframe['question_type'].astype(int).tolist()
-        self.scores = dataframe['final'].astype(float).tolist()
+        self.scores = dataframe['grammar'].astype(float).tolist()
         raw_texts = dataframe['text'].tolist()
         self.texts = [
             f"{self.text_prefix} [Question Type: {self.question_type_map.get(qtype, '')}] {t[2:-1]}"
@@ -154,7 +170,12 @@ class ESLDatasetWithAudio(Dataset):
             num_chunks: Number of audio chunks to extract
             chunk_length_sec: Length of each audio chunk in seconds
         """
+        original_indices_before_clean = dataframe.index.tolist()
+    
         dataframe = clean_dataframe(dataframe, remove_low_content)
+        
+        # Map cleaned indices back to original
+        self.original_indices = [original_indices_before_clean[i] for i in dataframe.index]
         self.audio_processor = audio_processor
         self.num_chunks = num_chunks
         self.chunk_length_sec = chunk_length_sec
@@ -162,9 +183,9 @@ class ESLDatasetWithAudio(Dataset):
         # Original text processing (unchanged)
         self.text_prefix = "The following is a spoken English response by a non-native speaker. Grade the grammar score based on the transcript below:"
         self.question_type_map = {
-            1: "Social Interaction – Answer 3–6 questions about 1–2 familiar topics",
-            2: "Solution Discussion – Choose one option from a situation and justify your choice",
-            3: "Topic Development – Present a given topic with supporting ideas and answer follow-up questions"
+            1: "Social Interaction: Answer sevaral questions about familiar topics",
+            2: "Solution Discussion: Choose one option from a situation and justify your choice",
+            3: "Topic Development: Present a given topic with supporting ideas and answer follow-up questions"
         }
         
         self.question_types = dataframe['question_type'].astype(int).tolist()
@@ -176,7 +197,7 @@ class ESLDatasetWithAudio(Dataset):
         ]
         
         # Audio paths
-        dataframe['absolute_path'] = dataframe['absolute_path'].str.replace('/mnt/son_usb/DATA_Vocal', '/media/gpus/Data/DATA_Vocal')
+        dataframe['absolute_path'] = dataframe['absolute_path'].str.replace("/mnt/son_usb/DATA_Vocal","/media/gpus/Data/DATA_Vocal")
         self.absolute_paths = dataframe['absolute_path'].tolist() if 'absolute_path' in dataframe.columns else [None] * len(self.texts)
 
     def __len__(self):
@@ -186,7 +207,8 @@ class ESLDatasetWithAudio(Dataset):
         item = {
             'text': self.texts[idx],
             'score': torch.tensor(self.scores[idx], dtype=torch.float32),
-            'question_type': self.question_types[idx]
+            'question_type': self.question_types[idx],
+            'original_index': self.original_indices[idx]
         }
         
         # Process audio if available
@@ -206,11 +228,13 @@ class ESLDatasetWithAudio(Dataset):
                 chunk_samples = int(self.chunk_length_sec * 16000)
                 item['audio'] = torch.zeros(self.num_chunks, chunk_samples)
                 item['has_audio'] = False
+                
         else:
             # Create dummy audio tensor
             chunk_samples = int(self.chunk_length_sec * 16000)
             item['audio'] = torch.zeros(self.num_chunks, chunk_samples)
             item['has_audio'] = False
+            
             
         return item
 
@@ -283,14 +307,18 @@ def get_collate_fn_with_audio(tokenizer, max_length=8192):
         else:
             audios = None
 
+        original_indices = [item['original_index'] for item in batch]
+        
         return {
             'input_ids': encoded['input_ids'],
             'attention_mask': encoded['attention_mask'],
             'score': scores,
             'question_type': question_types,
             'audio': audios,
-            'has_audio': has_audio
+            'has_audio': has_audio,
+            'original_indices': original_indices
         }
+        
     return collate_fn
 
 class AttentionPooling(nn.Module):
@@ -338,7 +366,7 @@ class AttentionPooling(nn.Module):
 class ESLGradingModelWithAudio(nn.Module):
     def __init__(self, 
                  model_name='bert-base-uncased', 
-                 audio_encoder_id="facebook/wav2vec2-base-960h",
+                 audio_encoder_id="jonatasgrosman/wav2vec2-large-xlsr-53-english",
                  pooling_dropout=0.3, 
                  regression_dropout=0.5, 
                  avg_last_k=4,
@@ -359,12 +387,12 @@ class ESLGradingModelWithAudio(nn.Module):
 
         # Original attention pooling (unchanged)
         self.attn_proj = nn.Sequential(
-            nn.Linear(text_hidden_size, 256),
+            nn.Linear(d_fuse, 256),
             nn.Tanh(), 
             nn.Dropout(pooling_dropout),
             nn.Linear(256, 1, bias=False)
         )
-        self.attn_pool = AttentionPooling(text_hidden_size, attn_proj=self.attn_proj, expected_seq_len=512, dropout=pooling_dropout)
+        self.attn_pool = AttentionPooling(d_fuse, attn_proj=self.attn_proj, expected_seq_len=512, dropout=pooling_dropout)
 
         # ========== NEW AUDIO PIPELINE ==========
         # Audio encoder
@@ -386,7 +414,7 @@ class ESLGradingModelWithAudio(nn.Module):
         # ========== ENHANCED REGRESSION HEAD ==========
         # Now takes concatenated text features + fused audio-text features
         self.reg_head = nn.Sequential(
-            nn.Linear(text_hidden_size + d_fuse, 256, bias=False),  # text_hidden_size + d_fuse
+            nn.Linear(d_fuse, 256, bias=False),  # text_hidden_size + d_fuse
             nn.LayerNorm(256),
             nn.GELU(),
             nn.Dropout(regression_dropout),
@@ -410,10 +438,10 @@ class ESLGradingModelWithAudio(nn.Module):
             hidden_states = torch.stack(all_hidden_states[-k:], dim=0).mean(dim=0)
         hidden_states = hidden_states.float()
 
-        with torch.amp.autocast('cuda', enabled=False):
-            pooled_text = self.attn_pool(hidden_states, attention_mask, visualize=visualize)
+        # with torch.amp.autocast('cuda', enabled=False):
+        #     pooled_text = self.attn_pool(hidden_states, attention_mask, visualize=visualize)
 
-        return pooled_text, hidden_states
+        return hidden_states
 
     def encode_audio(self, audio):
         """
@@ -425,27 +453,28 @@ class ESLGradingModelWithAudio(nn.Module):
         """
         if audio is None:
             return None
-            
+
         batch_size, num_chunks, waveform_len = audio.shape
         device = next(self.parameters()).device
-        
+
         audio_encoder_out = []
         for i in range(num_chunks):
             inp = audio[:, i, :].to(device)
             with torch.no_grad():  # Freeze audio encoder gradients if needed
                 out = self.audio_encoder(input_values=inp).last_hidden_state
                 audio_encoder_out.append(out.mean(dim=1).detach().cpu())
-            
+
             del inp, out
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        
+
         audio_features = torch.stack(audio_encoder_out, dim=1).to(device)  # (batch, num_chunks, audio_hidden_dim)
         audio_features = self.audio_proj(audio_features)  # (batch, num_chunks, d_fuse)
         audio_features = self.audio_norm(audio_features)
-        
+
         return audio_features
+
 
     def fuse_audio_text(self, text_features, audio_features):
         """
@@ -466,16 +495,16 @@ class ESLGradingModelWithAudio(nn.Module):
         
         # Cross-attention: use audio as query, text as key/value
         fused_output, _ = self.audio_text_attention(
-            query=audio_features, 
-            key=text_proj, 
-            value=text_proj
+            query=text_proj, 
+            key=audio_features, 
+            value=audio_features
         )
         fused_output = self.attention_norm(fused_output)
         
         # Pool across audio chunks
-        fused_vector = fused_output.mean(dim=1)  # (batch, d_fuse)
+        #fused_vector = fused_output.mean(dim=1)  # (batch, d_fuse)
         
-        return fused_vector
+        return fused_output # (batch, seq_len, d_fuse)
 
     def forward(self, input_ids, attention_mask, audio=None):
         """
@@ -486,16 +515,20 @@ class ESLGradingModelWithAudio(nn.Module):
             audio: Audio tensor (batch, num_chunks, waveform_len) or None
         """
         # Text encoding (original pipeline)
-        pooled_text, text_hidden_states = self.encode_text(input_ids, attention_mask)
-        
+        text_hidden_states = self.encode_text(input_ids, attention_mask)
+        #print(f"text_hidden_states shape: {text_hidden_states.shape}")
         # Audio encoding (new)
         audio_features = self.encode_audio(audio)
-        
+        #print(f"audio_features shape: {audio_features.shape}")
         # Audio-text fusion (new)
         fused_features = self.fuse_audio_text(text_hidden_states, audio_features)
-        
+        #print(f"fused_features shape: {fused_features.shape}")
+         
         # Concatenate text and fused features
-        combined_features = torch.cat([pooled_text, fused_features], dim=1)
+        #combined_features = torch.cat([pooled_text, fused_features], dim=1)
+        with torch.amp.autocast('cuda', enabled=False):
+             combined_features = self.attn_pool(fused_features, attention_mask, visualize=False)
+        #combined_features = 
         
         # Final prediction
         logits = self.reg_head(combined_features)
@@ -526,7 +559,7 @@ class ESLGradingModelWithAudio(nn.Module):
         checkpoint = torch.load(path, map_location='cpu')
         config = checkpoint['config']
         model = cls(
-            model_name=config.get('model_name', 'bert-base-uncased'),
+            model_name=config.get('model_name', 'Alibaba-NLP/gte-multilingual-base'),
             pooling_dropout=config.get('pooling_dropout', 0.3),
             regression_dropout=config.get('regression_dropout', 0.5),
             avg_last_k=config.get('avg_last_k', 1),
@@ -661,7 +694,7 @@ class ESLTrainer:
             batch_size=self.batch_size,
             sampler=train_sampler,
             collate_fn=collate_fn,
-            num_workers=40,  
+            num_workers=8,  
             pin_memory=True,
             persistent_workers=True
         )
@@ -675,7 +708,7 @@ class ESLTrainer:
             ESLDataset(val_df),
             batch_size=self.batch_size,
             collate_fn=collate_fn,
-            num_workers=40,  
+            num_workers=8,  
             pin_memory=True,
             persistent_workers=True
         )
@@ -684,7 +717,7 @@ class ESLTrainer:
             ESLDataset(test_df),
             batch_size=self.batch_size,
             collate_fn=collate_fn,
-            num_workers=40,  
+            num_workers=8,  
             pin_memory=True,
             persistent_workers=True
         )
@@ -926,7 +959,7 @@ class ESLTrainerWithAudio(ESLTrainer):
             batch_size=self.batch_size,
             sampler=train_sampler,
             collate_fn=collate_fn,
-            num_workers=40,  
+            num_workers=8,  
             pin_memory=True,
             persistent_workers=True
         )
@@ -942,7 +975,7 @@ class ESLTrainerWithAudio(ESLTrainer):
             ESLDatasetWithAudio(val_df, self.audio_processor),
             batch_size=self.batch_size,
             collate_fn=collate_fn,
-            num_workers=40,  
+            num_workers=8,  
             pin_memory=True,
             persistent_workers=True
         )
@@ -951,7 +984,7 @@ class ESLTrainerWithAudio(ESLTrainer):
             ESLDatasetWithAudio(test_df, self.audio_processor),
             batch_size=self.batch_size,
             collate_fn=collate_fn,
-            num_workers=40,  
+            num_workers=8,  
             pin_memory=True,
             persistent_workers=True
         )
@@ -1044,7 +1077,7 @@ class ESLTrainerWithAudio(ESLTrainer):
                 "val_mae": val_mae
             }
             
-            # LOG TO WANDB
+            # LOG TO wandb
             wandb.log({**train_metrics, **val_metrics})
 
             # SỬA LOGIC SAVE BEST MODEL DỰA TRÊN VAL MAE
@@ -1054,7 +1087,7 @@ class ESLTrainerWithAudio(ESLTrainer):
                 best_state_dict = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
                 
                 # SAVE BEST CHECKPOINT
-                checkpoint_path = "./model/model_with_audio_bestmae.pth"  # THAY ĐỔI DÒNG NÀY
+                checkpoint_path = "./model/model_with_audio_bestmae_pretrainedAudioEncoder_aug.pth"  # THAY ĐỔI DÒNG NÀY
                 os.makedirs("./model", exist_ok=True)
                 self.model.save(checkpoint_path)
                 
@@ -1062,7 +1095,7 @@ class ESLTrainerWithAudio(ESLTrainer):
                 print(save_message)
                 self.logger.info(save_message)
                 
-                # THÊM LOG TO WANDB
+                # THÊM LOG TO wandb
                 wandb.log({"best_val_mae": val_mae, "best_epoch": epoch + 1})
                 
             elif val_mae > best_val_mae * 1.15:  # SỬA: DÙNG MAE THAY VÌ LOSS
@@ -1127,6 +1160,124 @@ class ESLTrainerWithAudio(ESLTrainer):
         
         return weighted_avg, per_item_avg, mae_avg 
 
+    def test(self, output_csv_path="./results/test_predictions.csv"):
+        """
+        Test the model and save predictions to CSV
+        Args:
+            output_csv_path: Path to save CSV with GroundTruth and Predict Score columns
+        """
+        original_test_df = pd.read_csv(self.test_path)
+
+        # Tạo copy để thêm predictions
+        result_df = original_test_df.copy()
+        result_df['predict_score'] = np.nan  # Initialize với NaN
+        
+        self.model.eval()
+        total_loss = 0.0
+        total_mae = 0.0
+        count = 0
+        
+        # Lists to store all predictions and ground truth
+        all_ground_truth = []
+        all_predictions = []
+        
+        with torch.no_grad():
+            for batch in tqdm(self.test_loader, desc="Testing"):
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                audio = batch['audio'].to(self.device) if batch['audio'] is not None else None
+                true_scores = batch['score'].to(self.device)
+
+                with amp.autocast('cuda'):
+                    outputs = self.model(input_ids, attention_mask, audio)
+                    pred_scores = outputs['expected_score']  # (B,)
+
+                # Calculate losses
+                batch_mse = F.mse_loss(pred_scores, true_scores, reduction='sum').item()
+                batch_mae = torch.abs(pred_scores - true_scores).sum().item()
+                
+                total_loss += batch_mse
+                total_mae += batch_mae
+                count += input_ids.size(0)
+                
+                # Collect predictions and ground truth
+                all_ground_truth.extend(true_scores.cpu().numpy().tolist())
+                all_predictions.extend(pred_scores.cpu().numpy().tolist())
+                
+                batch_original_indices = batch['original_indices']
+                predictions = pred_scores.cpu().numpy()
+                
+                for orig_idx, pred_score in zip(batch_original_indices, predictions):
+                    result_df.loc[orig_idx, 'predict_score'] = pred_score
+
+        # Calculate final metrics
+        avg_mse = total_loss / count
+        avg_mae = total_mae / count
+        
+        # Create results DataFrame
+        results_df = pd.DataFrame({
+            'GroundTruth': all_ground_truth,
+            'Predict Score': all_predictions
+        })
+        
+        # Calculate additional metrics
+        results_df['Absolute Error'] = abs(results_df['GroundTruth'] - results_df['Predict Score'])
+        results_df['Squared Error'] = (results_df['GroundTruth'] - results_df['Predict Score']) ** 2
+        
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
+        
+        # Save to CSV
+        result_df.to_csv(output_csv_path, index=False)
+        
+        # Calculate correlation
+        correlation = np.corrcoef(all_ground_truth, all_predictions)[0, 1]
+        
+        # Print and log results
+        test_message = f"""
+        === TEST RESULTS ===
+        Test MSE: {avg_mse:.4f}
+        Test MAE: {avg_mae:.4f}
+        Test Correlation: {correlation:.4f}
+        Total samples: {count}
+        Results saved to: {output_csv_path}
+        ==================
+        """
+        
+        print(test_message)
+        if hasattr(self, 'logger'):
+            self.logger.info(test_message.replace('\n', ' '))
+        
+        # Log to wandb if available
+        try:
+            wandb.log({
+                "test_mse": avg_mse,
+                "test_mae": avg_mae, 
+                "test_correlation": correlation,
+                "test_samples": count
+            })
+        except:
+            pass  # wandb might not be initialized
+        
+        # Print some sample predictions
+        print("\n=== SAMPLE PREDICTIONS ===")
+        print(results_df.head(10).round(3))
+        print("\n=== WORST PREDICTIONS (Highest Absolute Error) ===")
+        worst_predictions = results_df.nlargest(5, 'Absolute Error')[['GroundTruth', 'Predict Score', 'Absolute Error']]
+        print(worst_predictions.round(3))
+        
+        # Score distribution analysis
+        print("\n=== SCORE DISTRIBUTION ANALYSIS ===")
+        print("Ground Truth distribution:")
+        print(pd.cut(results_df['GroundTruth'], bins=5, precision=1).value_counts().sort_index())
+        print("\nPredicted Score distribution:")
+        print(pd.cut(results_df['Predict Score'], bins=5, precision=1).value_counts().sort_index())
+        
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        return avg_mse, avg_mae, correlation, results_df
+    
 def get_param_groups(model, base_lr=1e-5, encoder_lr=1e-6, scale_lr=1e-3):
     special_params = []
     encoder_params = []
@@ -1137,7 +1288,7 @@ def get_param_groups(model, base_lr=1e-5, encoder_lr=1e-6, scale_lr=1e-3):
             continue
         if 'scale' in name or 'alpha' in name:
             special_params.append(param)
-        elif name.startswith('encoder.'):
+        elif name.startswith('encoder.') or 'audio_encoder' in name:
             encoder_params.append(param)
         else:
             base_params.append(param)
@@ -1154,7 +1305,7 @@ if __name__ == "__main__":
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = "./logs"
     os.makedirs(log_dir, exist_ok=True)
-    log_file = f"{log_dir}/training_{timestamp}.log"
+    log_file = f"{log_dir}/training_small_class.log"
     
     logging.basicConfig(
         level=logging.INFO,
@@ -1167,78 +1318,83 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     
     # Initialize wandb
-    wandb.init(
-        project="esl-audio-grading",
-        name=f"audio_text_model_{timestamp}",
-        config={
-            "model_name": "Alibaba-NLP/gte-multilingual-base",
-            "audio_encoder": "facebook/wav2vec2-base-960h",
-            "batch_size": 6,
-            "epochs": 5,
-            "d_fuse": 256,
-            "pooling_dropout": 0.3,
-            "regression_dropout": 0.5
-        }
-    )
+    # wandb.init(
+    #     project="esl-audio-grading",
+    #     name=f"audio_text_model_{timestamp}_aug",
+    #     config={
+    #         "model_name": "Alibaba-NLP/gte-multilingual-base",
+    #         "audio_encoder": "jonatasgrosman/wav2vec2-large-xlsr-53-english",
+    #         "batch_size": 64,
+    #         "epochs": 30,
+    #         "d_fuse": 256,
+    #         "pooling_dropout": 0.3,
+    #         "regression_dropout": 0.5
+    #     }
+    # )
     
     # Initialize audio processor
-    audio_processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
+    audio_processor = Wav2Vec2Processor.from_pretrained("jonatasgrosman/wav2vec2-large-xlsr-53-english")
     
     # Initialize enhanced model
     model = ESLGradingModelWithAudio(
         model_name='Alibaba-NLP/gte-multilingual-base', 
-        audio_encoder_id="facebook/wav2vec2-base-960h",
+        audio_encoder_id="jonatasgrosman/wav2vec2-large-xlsr-53-english",
         pooling_dropout=0.3, 
         regression_dropout=0.5,
         d_fuse=256
     )
     
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    #device = 'cpu'  # Force CPU for testing
+
+    model = ESLGradingModelWithAudio.load("/media/gpus/Data/AES/ESL-Grading/model/model_with_audio_bestmae_pretrainedAudioEncoder_aug.pth").to(device)
     # ====================
     # Load pretrained Wav2Vec2 encoder
-    checkpoint_path = "/mnt/disk1/SonDinh/SonDinh/AES_project/speech-score-api_W2V/models/ckpt_pronunciation/ckpt_SWA_pronunciation_wav2vec2model.pth"
-    
-    try:
-        # Load checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    # checkpoint_path = "/mnt/disk1/SonDinh/SonDinh/AES_project/speech-score-api_W2V/models/ckpt_pronunciation/ckpt_SWA_pronunciation_wav2vec2model.pth"
+    # try:
+    #     # Load checkpoint
+    #     checkpoint = torch.load(checkpoint_path, map_location='cpu')
         
-        # Extract audio encoder weights
-        if 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
-        else:
-            state_dict = checkpoint
+    #     # Extract audio encoder weights
+    #     if 'model_state_dict' in checkpoint:
+    #         state_dict = checkpoint['model_state_dict']
+    #     else:
+    #         state_dict = checkpoint
         
-        # Filter audio encoder weights
-        audio_encoder_weights = {}
-        for key, value in state_dict.items():
-            if key.startswith('audio_encoder.'):
-                # Remove 'audio_encoder.' prefix to match current model structure
-                new_key = key[len('audio_encoder.'):]
-                audio_encoder_weights[new_key] = value
+    #     # Filter audio encoder weights
+    #     audio_encoder_weights = {}
+    #     for key, value in state_dict.items():
+    #         if key.startswith('audio_encoder.'):
+    #             # Remove 'audio_encoder.' prefix to match current model structure
+    #             new_key = key[len('audio_encoder.'):]
+    #             audio_encoder_weights[new_key] = value
         
-        # Load weights into current model's audio encoder
-        if audio_encoder_weights:
-            model.audio_encoder.load_state_dict(audio_encoder_weights, strict=False)
-            print(f"Successfully loaded pretrained Wav2Vec2 encoder from {checkpoint_path}")
-            print(f"Loaded {len(audio_encoder_weights)} audio encoder parameters")
-        else:
-            print("No audio encoder weights found in checkpoint")
+    #     # Load weights into current model's audio encoder
+    #     if audio_encoder_weights:
+    #         model.audio_encoder.load_state_dict(audio_encoder_weights, strict=False)
+    #         print(f"Successfully loaded pretrained Wav2Vec2 encoder from {checkpoint_path}")
+    #         print(f"Loaded {len(audio_encoder_weights)} audio encoder parameters")
+    #     else:
+    #         print("No audio encoder weights found in checkpoint")
             
-    except Exception as e:
-        print(f"Error loading pretrained audio encoder: {e}")
-        print("Continuing with randomly initialized Wav2Vec2 encoder")
-    # ====================
+    # except Exception as e:
+    #     print(f"Error loading pretrained audio encoder: {e}")
+    #     print("Continuing with randomly initialized Wav2Vec2 encoder")
+    # # ====================
     
     tokenizer = AutoTokenizer.from_pretrained('Alibaba-NLP/gte-multilingual-base')
 
+    # print(f"Model update parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    # print(f"Model total parameters: {sum(p.numel() for p in model.parameters())}")
     # Setup training parameters
-    train_df = pd.read_csv("./data/Full/train_pro.csv")
-    batch_size = 6  # Reduced due to audio memory requirements
-    epochs = 5
+    train_df = pd.read_csv("/media/gpus/Data/AES/ESL-Grading/data/Full/merged.csv")
+    batch_size = 8 # Reduced due to audio memory requirements
+    epochs = 20
     steps_per_epoch = len(train_df) // batch_size
     total_steps = steps_per_epoch * epochs
     warmup_steps = 500
 
-    param_groups = get_param_groups(model, base_lr=1e-4, encoder_lr=1e-5, scale_lr=1e-3)
+    param_groups = get_param_groups(model, base_lr=1e-5, encoder_lr=1e-6, scale_lr=1e-4)
     optimizer = torch.optim.AdamW(param_groups)
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
@@ -1249,7 +1405,7 @@ if __name__ == "__main__":
 
     # Initialize enhanced trainer
     trainer = ESLTrainerWithAudio(
-        train_path="./data/Full/train_pro.csv",
+        train_path="/media/gpus/Data/AES/ESL-Grading/data/Full/merged.csv",
         test_path="./data/Full/test_pro.csv",
         val_path="./data/Full/val_pro.csv",
         model=model,
@@ -1262,7 +1418,7 @@ if __name__ == "__main__":
         logger=logger
     )
 
-    trainer.train()
+    # trainer.train()
     trainer.test()
-    trainer.model.save("./model/model_with_audio_final.pth")
-    wandb.finish()
+    # trainer.model.save("./model/model_with_audio_final_pretrainedAudioEncoder_aug.pth")
+    # wandb.finish()
