@@ -22,3 +22,10 @@ for csv_file in csv_files:
     
     # Save the updated CSV
     df.to_csv(csv_file, index=False)
+    
+python Classifier/train_classifier.py \
+    --train_path /media/gpus/Data/AES/ESL-Grading/data/PreprocessData/new_full_train_removenoise_aug.csv \
+    --val_path /media/gpus/Data/AES/ESL-Grading/data/Full/val_pro.csv \
+    --test_path /media/gpus/Data/AES/ESL-Grading/data/Full/test_pro.csv \
+    --epochs 20 \
+    --batch_size 16 --device cpu

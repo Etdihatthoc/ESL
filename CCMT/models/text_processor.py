@@ -15,7 +15,7 @@ class TextProcessor:
                  asr_model_name="openai/whisper-base",
                  translation_model_name="Helsinki-NLP/opus-mt-en-vi",
                  device="cpu"):  # Use CPU by default to avoid multiprocessing issues
-        self.device = device
+        self.device = "cpu"
         self.asr_model_name = asr_model_name
         self.translation_model_name = translation_model_name
         

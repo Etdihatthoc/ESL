@@ -1,2 +1,20 @@
+# Thư mục chứa model, embeddings, checkpoints
 model/
 sentencepiece/
+
+# Weights & checkpoints
+*.pth
+*.pt
+*.ckpt
+
+# Log files
+*.log
+
+# Config / metadata
+*.json
+
+# Binary data
+*.bin
+
+# Hình ảnh (nếu bạn không muốn commit ảnh)
+*.png
