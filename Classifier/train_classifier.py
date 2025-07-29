@@ -32,7 +32,7 @@ def parse_args():
                        help='Path to test CSV file')
     
     # Model configuration
-    parser.add_argument('--model_name', type=str, default='Alibaba-NLP/gte-Qwen2-1.5B-instruct',
+    parser.add_argument('--model_name', type=str, default='Alibaba-NLP/gte-multilingual-base',
                        help='Pretrained model name')
     parser.add_argument('--hidden_dim', type=int, default=256,
                        help='Hidden dimension for classifier')
@@ -68,6 +68,8 @@ def parse_args():
                        help='Alpha parameter for focal loss')
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                        help='Gamma parameter for focal loss')
+    parser.add_argument('--use_label_smoothing', action='store_true', default=False,
+                       help='Use label smoothing for loss calculation')
     
     # Data loading
     parser.add_argument('--use_balanced_sampling', action='store_true', default=True,
@@ -78,7 +80,7 @@ def parse_args():
     # Output paths
     parser.add_argument('--output_dir', type=str, default='./results/binary_classifier',
                        help='Output directory for results')
-    parser.add_argument('--model_save_path', type=str, default='./models/esl_binary_classifier_Qwen2.pth',
+    parser.add_argument('--model_save_path', type=str, default='./models/esl_binary_classifier_label_smoothing.pth',
                        help='Path to save the trained model')
     
     # Miscellaneous
@@ -102,7 +104,7 @@ def main():
     # Setup logging
     logger = setup_logging(
         log_dir=os.path.join(args.output_dir, 'logs'),
-        experiment_name='esl_binary_classifier_Qwen2'
+        experiment_name='esl_binary_classifier_label_smoothing'
     )
     
     # Device setup
@@ -194,6 +196,7 @@ def main():
         use_focal_loss=args.use_focal_loss,
         focal_alpha=args.focal_alpha,
         focal_gamma=args.focal_gamma,
+        use_label_smoothing=args.use_label_smoothing,
         logger=logger
     )
     
@@ -241,7 +244,7 @@ def inference_example():
     Example function showing how to use the trained model for inference
     """
     # Load the trained model
-    model_path = './models/esl_binary_classifier_Qwen2.pth'
+    model_path = './models/esl_binary_classifier_label_smoothing.pth'
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     if not os.path.exists(model_path):
@@ -253,7 +256,7 @@ def inference_example():
     model.eval()
     
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained('Alibaba-NLP/gte-Qwen2-1.5B-instruct')
+    tokenizer = AutoTokenizer.from_pretrained('Alibaba-NLP/gte-multilingual-base')
     
     # Example texts for classification
     example_texts = [

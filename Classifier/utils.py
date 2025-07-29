@@ -221,6 +221,7 @@ def create_training_config(args, num_training_steps):
         'use_focal_loss': getattr(args, 'use_focal_loss', False),
         'focal_alpha': getattr(args, 'focal_alpha', 1.0),
         'focal_gamma': getattr(args, 'focal_gamma', 2.0),
+        'label_smoothing': getattr(args, 'label_smoothing', True),
         'num_training_steps': num_training_steps
     }
     return config

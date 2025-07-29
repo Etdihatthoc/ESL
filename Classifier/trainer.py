@@ -32,6 +32,7 @@ class ESLBinaryTrainer:
                  use_focal_loss=False,
                  focal_alpha=1.0,
                  focal_gamma=2.0,
+                 use_label_smoothing=False,
                  logger=None):
         
         self.model = model.to(device)
@@ -57,6 +58,9 @@ class ESLBinaryTrainer:
             self.criterion = nn.CrossEntropyLoss(weight=class_weights)
             self.logger.info(f"Using weighted CrossEntropyLoss with weights: {class_weights}")
         
+        # Label smoothing
+        self.use_label_smoothing = use_label_smoothing
+        
         # For tracking best model
         self.best_val_acc = 0.0
         self.best_val_f1 = 0.0
@@ -73,40 +77,50 @@ class ESLBinaryTrainer:
         total_samples = 0
         all_predictions = []
         all_targets = []
-        
+
         for batch in tqdm(self.train_loader, desc="Training"):
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
             targets = batch['group'].to(self.device)
-            
+            audio = batch['audio'].to(self.device) if batch['audio'] is not None else None
+
+
+            # Use soft labels if label smoothing is enabled
+            if self.use_label_smoothing:
+                soft_labels = batch['soft_labels'].to(self.device)
+                train_targets = soft_labels
+            else:
+                train_targets = targets
+
             self.optimizer.zero_grad()
-            
+
             with amp.autocast('cuda'):
-                outputs = self.model(input_ids, attention_mask)
+                outputs = self.model(input_ids, attention_mask, audio)
                 logits = outputs['logits']
-                loss = self.criterion(logits, targets)
-            
+                # If using label smoothing, assume criterion supports soft labels
+                loss = self.criterion(logits, train_targets)
+
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            
+
             if self.scheduler is not None:
                 self.scheduler.step()
-            
+
             # Statistics
             predictions = torch.argmax(logits, dim=-1)
             total_loss += loss.item()
             total_correct += (predictions == targets).sum().item()
             total_samples += targets.size(0)
-            
+
             all_predictions.extend(predictions.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
-        
+
         # Calculate metrics
         epoch_loss = total_loss / len(self.train_loader)
         epoch_acc = total_correct / total_samples
         epoch_f1 = f1_score(all_targets, all_predictions, average='weighted')
-        
+
         return {
             'loss': epoch_loss,
             'accuracy': epoch_acc,
@@ -132,9 +146,10 @@ class ESLBinaryTrainer:
                 attention_mask = batch['attention_mask'].to(self.device)
                 targets = batch['group'].to(self.device)
                 raw_scores = batch['raw_score']
+                audio = batch['audio'].to(self.device) if batch['audio'] is not None else None
                 
                 with amp.autocast('cuda'):
-                    outputs = self.model(input_ids, attention_mask)
+                    outputs = self.model(input_ids, attention_mask, audio)
                     logits = outputs['logits']
                     probabilities = outputs['probabilities']
                     loss = self.criterion(logits, targets)
@@ -234,9 +249,10 @@ class ESLBinaryTrainer:
                 targets = batch['group'].to(self.device)
                 raw_scores = batch['raw_score']
                 question_types = batch['question_type']
+                audio = batch['audio'].to(self.device) if batch['audio'] is not None else None
                 
                 with amp.autocast('cuda'):
-                    outputs = self.model(input_ids, attention_mask)
+                    outputs = self.model(input_ids, attention_mask, audio)
                     probabilities = outputs['probabilities']
                 
                 predictions = torch.argmax(outputs['logits'], dim=-1)

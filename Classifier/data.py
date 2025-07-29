@@ -8,7 +8,91 @@ import pandas as pd
 import numpy as np
 from collections import Counter
 from text_processing import ALL_STOPWORDS, is_low_content, replace_repeats, most_common_words
+from scipy.stats import norm
+import functools
+import librosa
+import audiomentations as A
+import random
+import asyncio
+import os
+import gc
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
+# wandb.login(key='072fb112587c6b4507f5ec59e575d234c3e22649', relogin=True)
+
+async def preprocess_audio_wav2vec(absolute_path, processor, sample_rate=16000, num_chunks=10, chunk_length_sec=30):
+    """
+    Asynchronously preprocess audio file for the Wav2Vec2 model.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        audio_tensor = await loop.run_in_executor(
+            None,
+            lambda: _process_audio_file(absolute_path, processor, sample_rate, num_chunks, chunk_length_sec)
+        )
+        return audio_tensor
+    except Exception as e:
+        print(f"Error in preprocessing audio: {str(e)}")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise
+
+def _process_audio_file(absolute_path, processor, sample_rate=16000, num_chunks=10, chunk_length_sec=30):
+    """Process a single audio file (non-async helper function)."""
+    audio, sr = librosa.load(absolute_path, sr=sample_rate)
+    audio_chunks = fixed_chunk_audio(audio, sr, num_chunks=num_chunks, chunk_length_sec=chunk_length_sec)
+    
+    chunk_samples = int(chunk_length_sec * sample_rate)
+    processed_chunks = []
+    
+    for chunk in audio_chunks:
+        inputs = processor(chunk, sampling_rate=sample_rate, return_tensors="pt")
+        chunk_tensor = inputs.input_values.squeeze(0)
+        
+        if chunk_tensor.shape[0] < chunk_samples:
+            pad_length = chunk_samples - chunk_tensor.shape[0]
+            chunk_tensor = torch.nn.functional.pad(chunk_tensor, (0, pad_length), 'constant', 0)
+        elif chunk_tensor.shape[0] > chunk_samples:
+            chunk_tensor = chunk_tensor[:chunk_samples]
+            
+        processed_chunks.append(chunk_tensor)
+    
+    audio_tensor = torch.stack(processed_chunks)
+    del audio, audio_chunks
+    gc.collect()
+    return audio_tensor
+
+def fixed_chunk_audio(audio, sr, num_chunks=10, chunk_length_sec=30):
+    """Cuts audio into exactly num_chunks with each chunk of length chunk_length_sec."""
+    chunk_samples = int(chunk_length_sec * sr)
+    audio_length = len(audio)
+    if audio_length < chunk_samples:
+        audio = np.pad(audio, (0, chunk_samples - audio_length), mode='constant')
+        audio_length = len(audio)
+    
+    if num_chunks == 1:
+        starts = [0]
+    else:
+        max_start = audio_length - chunk_samples
+        starts = np.linspace(0, max_start, num_chunks, dtype=int)
+    
+    chunks = []
+    for start in starts:
+        end = start + chunk_samples
+        chunk = audio[start:end]
+        chunks.append(chunk)
+    return chunks
+
+def gaussian_soft_label(score, threshold=6.75, sigma=0.5):
+    """
+    Returns the soft label for a given raw score using a Gaussian distribution
+    centered at the threshold.
+    """
+    z = (score - threshold) / sigma
+    return norm.cdf(z)  # P(class 1)
 
 def clean_dataframe(df, remove_low_content=True, filter_scores=True):
     """
@@ -50,33 +134,63 @@ def convert_score_to_group(score):
 
 class ESLBinaryDataset(Dataset):
     """
-    Dataset for binary classification of ESL scores into two groups
+    Dataset for binary classification of ESL scores into two groups,
+    with audio support.
     """
-    def __init__(self, dataframe, remove_low_content=True):
+    def __init__(self, dataframe, audio_processor=None, remove_low_content=True, 
+                 num_chunks=10, chunk_length_sec=30, is_train=False):
         dataframe = clean_dataframe(dataframe, remove_low_content, filter_scores=True)
-        
+        self.audio_processor = audio_processor
+        self.num_chunks = num_chunks
+        self.chunk_length_sec = chunk_length_sec
+        self.is_train = is_train
+
         self.text_prefix = "The following is a spoken English response by a non-native speaker. Classify the proficiency level based on the transcript below:"
         self.question_type_map = {
             1: "Social Interaction: Answer several questions about familiar topics",
             2: "Solution Discussion: Choose one option from a situation and justify your choice",
             3: "Topic Development: Present a given topic with supporting ideas and answer follow-up questions"
         }
-        
+
         self.question_types = dataframe['question_type'].astype(int).tolist()
-        
-        # Convert scores to binary groups
         raw_scores = dataframe['grammar'].astype(float).tolist()
         self.groups = [convert_score_to_group(score) for score in raw_scores]
-        self.raw_scores = raw_scores  # Keep original scores for analysis
-        
-        # Process texts
+        self.raw_scores = raw_scores
+        self.soft_labels = [gaussian_soft_label(score) for score in raw_scores]
+
         raw_texts = dataframe['text'].tolist()
         self.texts = [
             f"{self.text_prefix} [Question Type: {self.question_type_map.get(qtype, '')}] {t[2:-1]}"
             for t, qtype in zip(raw_texts, self.question_types)
         ]
+
+        # Audio paths
+        if 'absolute_path' in dataframe.columns:
+            dataframe['absolute_path'] = dataframe['absolute_path'].str.replace(
+                "/mnt/son_usb/DATA_Vocal", "/media/gpus/Data/DATA_Vocal"
+            )
+            self.absolute_paths = dataframe['absolute_path'].tolist()
+        else:
+            self.absolute_paths = [None] * len(self.texts)
         
-        # Print group distribution
+        # Audio augmentations (only used during training)
+        if self.is_train:
+            self.noise_aug = A.AddGaussianNoise(
+                min_amplitude=0.001, 
+                max_amplitude=0.015, 
+                p=1.0
+            )
+            self.speed_aug = A.TimeStretch(
+                min_rate=0.8, 
+                max_rate=1.25, 
+                p=1.0
+            )
+            self.pitch_aug = A.PitchShift(
+                min_semitones=-4, 
+                max_semitones=4, 
+                p=1.0
+            )
+
         group_counts = Counter(self.groups)
         print(f"Group distribution - Group 0 (3.5-6.5): {group_counts[0]}, Group 1 (7-10): {group_counts[1]}")
 
@@ -84,12 +198,65 @@ class ESLBinaryDataset(Dataset):
         return len(self.texts)
 
     def __getitem__(self, idx):
-        return {
+        item = {
             'text': self.texts[idx],
             'group': torch.tensor(self.groups[idx], dtype=torch.long),
             'raw_score': torch.tensor(self.raw_scores[idx], dtype=torch.float32),
+            'soft_label': torch.tensor(self.soft_labels[idx], dtype=torch.float32),
             'question_type': self.question_types[idx]
         }
+
+        # Process audio if available
+        if self.absolute_paths[idx] is not None and self.audio_processor is not None:
+            try:
+                # Load raw audio first (before processing)
+                audio, sr = librosa.load(self.absolute_paths[idx], sr=16000)
+                
+                # Apply augmentations during training
+                if self.is_train:
+                    if random.random() < 0.7:
+                        audio = self.noise_aug(samples=audio, sample_rate=sr)
+                    if random.random() < 0.7:
+                        audio = self.speed_aug(samples=audio, sample_rate=sr)
+                    if random.random() < 0.7:
+                        audio = self.pitch_aug(samples=audio, sample_rate=sr)
+                
+                # Now process the augmented audio
+                audio_chunks = fixed_chunk_audio(audio, sr, num_chunks=self.num_chunks, 
+                                                chunk_length_sec=self.chunk_length_sec)
+                
+                chunk_samples = int(self.chunk_length_sec * sr)
+                processed_chunks = []
+                
+                for chunk in audio_chunks:
+                    inputs = self.audio_processor(chunk, sampling_rate=sr, return_tensors="pt")
+                    chunk_tensor = inputs.input_values.squeeze(0)
+                    
+                    if chunk_tensor.shape[0] < chunk_samples:
+                        pad_length = chunk_samples - chunk_tensor.shape[0]
+                        chunk_tensor = torch.nn.functional.pad(chunk_tensor, (0, pad_length), 'constant', 0)
+                    elif chunk_tensor.shape[0] > chunk_samples:
+                        chunk_tensor = chunk_tensor[:chunk_samples]
+                        
+                    processed_chunks.append(chunk_tensor)
+                
+                audio_tensor = torch.stack(processed_chunks)
+                item['audio'] = audio_tensor
+                item['has_audio'] = True
+                
+            except Exception as e:
+                print(f"Error processing audio {self.absolute_paths[idx]}: {e}")
+                # Create dummy audio tensor if processing fails
+                chunk_samples = int(self.chunk_length_sec * 16000)
+                item['audio'] = torch.zeros(self.num_chunks, chunk_samples)
+                item['has_audio'] = False
+        else:
+            # Create dummy audio tensor
+            chunk_samples = int(self.chunk_length_sec * 16000)
+            item['audio'] = torch.zeros(self.num_chunks, chunk_samples)
+            item['has_audio'] = False
+
+        return item
 
 
 class BalancedSampler(Sampler):
@@ -128,33 +295,38 @@ class BalancedSampler(Sampler):
         return len(self.dataset)
 
 
-def get_binary_collate_fn(tokenizer, max_length=8192):
-    """
-    Collate function for binary classification
-    """
-    def collate_fn(batch):
-        texts = [item['text'] for item in batch]
-        groups = torch.stack([item['group'] for item in batch])
-        raw_scores = torch.stack([item['raw_score'] for item in batch])
-        question_types = torch.tensor([item['question_type'] for item in batch], dtype=torch.long)
+def binary_collate_fn(batch, tokenizer, max_length=8192):
+    texts = [item['text'] for item in batch]
+    groups = torch.stack([item['group'] for item in batch])
+    raw_scores = torch.stack([item['raw_score'] for item in batch])
+    soft_labels = torch.stack([item['soft_label'] for item in batch])
+    question_types = torch.tensor([item['question_type'] for item in batch], dtype=torch.long)
 
-        encoded = tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=max_length,
-            return_tensors='pt'
-        )
+    encoded = tokenizer(
+        texts,
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+        return_tensors='pt'
+    )
 
-        return {
-            'input_ids': encoded['input_ids'],
-            'attention_mask': encoded['attention_mask'],
-            'group': groups,
-            'raw_score': raw_scores,
-            'question_type': question_types
-        }
-    
-    return collate_fn
+    # Audio processing
+    has_audio = [item.get('has_audio', False) for item in batch]
+    if any(has_audio):
+        audios = torch.stack([item['audio'] for item in batch])
+    else:
+        audios = None
+
+    return {
+        'input_ids': encoded['input_ids'],
+        'attention_mask': encoded['attention_mask'],
+        'group': groups,
+        'raw_score': raw_scores,
+        'soft_label': soft_labels,
+        'question_type': question_types,
+        'audio': audios,
+        'has_audio': has_audio
+    }
 
 
 def create_data_loaders(train_path, val_path, test_path, tokenizer, batch_size=32, use_balanced_sampling=True):
@@ -165,7 +337,7 @@ def create_data_loaders(train_path, val_path, test_path, tokenizer, batch_size=3
     val_df = pd.read_csv(val_path)
     test_df = pd.read_csv(test_path)
     
-    collate_fn = get_binary_collate_fn(tokenizer)
+    collate_fn = functools.partial(binary_collate_fn, tokenizer=tokenizer)
     
     # Create datasets
     train_dataset = ESLBinaryDataset(train_df)
@@ -180,8 +352,9 @@ def create_data_loaders(train_path, val_path, test_path, tokenizer, batch_size=3
             batch_size=batch_size,
             sampler=train_sampler,
             collate_fn=collate_fn,
-            num_workers=4,
-            pin_memory=True
+            num_workers=40,
+            pin_memory=True,
+            persistent_workers=True
         )
     else:
         train_loader = DataLoader(
@@ -189,8 +362,9 @@ def create_data_loaders(train_path, val_path, test_path, tokenizer, batch_size=3
             batch_size=batch_size,
             shuffle=True,
             collate_fn=collate_fn,
-            num_workers=4,
-            pin_memory=True
+            num_workers=40,
+            pin_memory=True,
+            persistent_workers=True
         )
     
     val_loader = DataLoader(
@@ -198,8 +372,9 @@ def create_data_loaders(train_path, val_path, test_path, tokenizer, batch_size=3
         batch_size=batch_size,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=4,
-        pin_memory=True
+        num_workers=40,
+        pin_memory=True,
+        persistent_workers=True
     )
     
     test_loader = DataLoader(
@@ -207,8 +382,9 @@ def create_data_loaders(train_path, val_path, test_path, tokenizer, batch_size=3
         batch_size=batch_size,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=4,
-        pin_memory=True
+        num_workers=40,
+        pin_memory=True,
+        persistent_workers=True
     )
     
     return train_loader, val_loader, test_loader, train_dataset
