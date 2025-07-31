@@ -201,7 +201,7 @@ def create_model_config(args):
         'pooling_dropout': getattr(args, 'pooling_dropout', 0.3),
         'classifier_dropout': getattr(args, 'classifier_dropout', 0.5),
         'avg_last_k': getattr(args, 'avg_last_k', 4),
-        'hidden_dim': getattr(args, 'hidden_dim', 256)
+        'd_fuse': getattr(args, 'd_fuse', 256)
     }
     return config
 

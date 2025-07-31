@@ -61,13 +61,13 @@ class ESLBinaryClassifier(nn.Module):
                  model_name='Alibaba-NLP/gte-multilingual-base', 
                  audio_encoder_id="jonatasgrosman/wav2vec2-large-xlsr-53-english",
                  pooling_dropout=0.3, 
-                 classification_dropout=0.5, 
+                 classifier_dropout=0.5, 
                  avg_last_k=4,
                  d_fuse=256):
         super().__init__()
         self.num_types = 3
         self.pooling_dropout = pooling_dropout
-        self.classification_dropout = classification_dropout
+        self.classifier_dropout = classifier_dropout
         self.avg_last_k = avg_last_k
         self.d_fuse = d_fuse
 
@@ -141,11 +141,11 @@ class ESLBinaryClassifier(nn.Module):
             nn.Linear(3 * d_fuse, 2 * d_fuse, bias=False),
             nn.LayerNorm(2 * d_fuse),
             nn.GELU(),
-            nn.Dropout(classification_dropout),
+            nn.Dropout(self.classifier_dropout),
             nn.Linear(2 * d_fuse, d_fuse, bias=False),
             nn.LayerNorm(d_fuse),
             nn.GELU(),
-            nn.Dropout(classification_dropout),
+            nn.Dropout(self.classifier_dropout),
             nn.Linear(d_fuse, 2, bias=False)
         )
 

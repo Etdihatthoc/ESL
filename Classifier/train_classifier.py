@@ -34,8 +34,8 @@ def parse_args():
     # Model configuration
     parser.add_argument('--model_name', type=str, default='Alibaba-NLP/gte-multilingual-base',
                        help='Pretrained model name')
-    parser.add_argument('--hidden_dim', type=int, default=256,
-                       help='Hidden dimension for classifier')
+    parser.add_argument('--d_fuse', type=int, default=256,
+                       help='Hidden dimension for fusion layers')
     parser.add_argument('--pooling_dropout', type=float, default=0.3,
                        help='Dropout rate for pooling layer')
     parser.add_argument('--classifier_dropout', type=float, default=0.5,
