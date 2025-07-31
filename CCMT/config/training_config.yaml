@@ -1,0 +1,153 @@
+# Training Configuration for CCMT
+# Training hyperparameters and optimization settings
+
+# Training Parameters
+training:
+  num_epochs: 50
+  batch_size: 1
+  eval_every_n_epochs: 1
+  log_every_n_batches: 10
+  gradient_accumulation_steps: 1
+  
+# Optimization
+optimizer:
+  type: "adamw"
+  learning_rate: 1e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  gradient_clip: 1.0
+
+# Learning Rate Scheduling
+scheduler:
+  use_scheduler: true
+  type: "cosine"  # "cosine", "linear", "reduce_on_plateau"
+  warmup_steps: 1000
+  min_lr: 1e-6
+  
+  # For ReduceLROnPlateau
+  patience: 5
+  factor: 0.5
+  monitor: "val_loss"
+
+# Loss Function
+loss:
+  type: "classification"  # "classification", "regression", "combined"
+  label_smoothing: 0.0
+  use_class_weights: false
+  
+  # For focal loss
+  use_focal: false
+  focal_alpha: 1.0
+  focal_gamma: 2.0
+  
+  # For combined loss
+  classification_weight: 1.0
+  regression_weight: 0.1
+  
+  # For regression
+  regression_type: "mse"  # "mse", "mae", "huber"
+
+# Callbacks
+callbacks:
+  # Early Stopping
+  early_stopping:
+    enabled: true
+    monitor: "val_loss"
+    patience: 10
+    min_delta: 0.001
+    mode: "min"
+    restore_best_weights: true
+  
+  # Model Checkpointing
+  model_checkpoint:
+    enabled: true
+    monitor: "val_loss"
+    mode: "min"
+    save_best_only: true
+    save_last: true
+    save_every_n_epochs: 5
+    filename: "checkpoint_epoch_{epoch:03d}.pt"
+  
+  # Learning Rate Scheduler
+  lr_scheduler:
+    enabled: true
+    monitor: "val_loss"  # For ReduceLROnPlateau
+  
+  # Metrics Logging
+  metrics_logger:
+    enabled: true
+    log_every_n_batches: 10
+    save_metrics: true
+
+# Validation and Evaluation
+validation:
+  enabled: true
+  batch_size: 1  # Can be larger than training batch_size
+  
+evaluation:
+  metrics:
+    - "accuracy"
+    - "pearson"
+    - "spearman"
+    - "mae"
+    - "rmse"
+    - "within_0.5"
+    - "within_1.0"
+
+# Mixed Precision Training
+mixed_precision:
+  enabled: true
+  opt_level: "O1"  # "O0", "O1", "O2", "O3"
+
+# Data Loading
+dataloader:
+  num_workers: 4
+  pin_memory: true
+  drop_last: true  # For training
+  persistent_workers: false
+  prefetch_factor: 2
+
+# Augmentation (during training)
+augmentation:
+  enabled: false
+  
+  # Audio augmentation
+  audio:
+    noise_prob: 0.3
+    noise_factor: 0.05
+    pitch_shift_prob: 0.2
+    pitch_shift_range: [-2.0, 2.0]
+    speed_change_prob: 0.2
+    speed_range: [0.9, 1.1]
+    volume_change_prob: 0.4
+    volume_range: [0.7, 1.3]
+    time_masking_prob: 0.1
+  
+  # Text augmentation
+  text:
+    synonym_replacement_prob: 0.1
+    random_insertion_prob: 0.05
+    typo_injection_prob: 0.05
+    max_changes: 2
+
+# Logging
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_to_console: true
+  
+# Reproducibility
+seed: 42
+deterministic: false  # Set to true for reproducible results (slower)
+
+# Memory and Performance
+memory:
+  empty_cache_every_n_batches: 100
+  max_memory_gb: 8.0  # Recommended memory limit
+
+# # Distributed Training (if needed)
+# distributed:
+#   enabled: false
+#   backend: "nccl"
+#   init_method: "env://"

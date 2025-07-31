@@ -1,0 +1,85 @@
+# Model Configuration for CCMT Architecture
+# CCMT model hyperparameters and architecture settings
+
+# CCMT Architecture
+model:
+  model_name: "ccmt-base"
+  model_size: "base"  # "base", "large", "small"
+  
+  # Core Architecture
+  model_dim: 768  # Token embedding dimension
+  num_patches: 300  # Total tokens (100 per modality: English + Vietnamese + Audio)
+  patches_per_modality: 100
+  
+  # Transformer Blocks
+  depth: 6  # Number of transformer layers
+  heads: 8  # Number of attention heads
+  dim_head: 64  # Dimension per attention head
+  mlp_dim: 2048  # Feed-forward hidden dimension
+  
+  # Regularization
+  dropout: 0.1
+  attention_dropout: 0.1
+  path_dropout: 0.0  # Stochastic depth
+  
+# Model Variants
+variants:
+  small:
+    model_dim: 512
+    depth: 4
+    heads: 6
+    mlp_dim: 1536
+    dropout: 0.1
+  
+  base:
+    model_dim: 768
+    depth: 6
+    heads: 8
+    mlp_dim: 2048
+    dropout: 0.1
+  
+  large:
+    model_dim: 1024
+    depth: 8
+    heads: 12
+    mlp_dim: 4096
+    dropout: 0.1
+
+# Individual Encoder Settings
+encoders:
+  audio:
+    target_dim: 768
+    max_tokens: 100
+    freeze_feature_extractor: true
+    dropout: 0.1
+  
+  english_text:
+    target_dim: 768
+    max_tokens: 100
+    max_length: 512
+    dropout: 0.1
+  
+  vietnamese_text:
+    target_dim: 768
+    max_tokens: 100
+    max_length: 512
+    dropout: 0.1
+
+# Scoring Head
+scoring_head:
+  hidden_dim: 384  # model_dim // 2
+  dropout: 0.2
+  activation: "gelu"
+
+# Translation Settings
+translation:
+  cache_size: 1000
+  batch_size: 32
+  max_length: 512
+  fallback_enabled: true
+
+# Model Initialization
+initialization:
+  xavier_uniform: true
+  bias_zero: true
+  positional_embedding_std: 0.02

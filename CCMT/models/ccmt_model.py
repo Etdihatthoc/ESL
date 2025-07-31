@@ -1,304 +1,254 @@
+"""
+Main CCMT architecture adapted for English speaking scoring task
+Based on the original CCMT implementation from ristea/ccmt
+"""
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math
-import os
-from typing import Optional
-from .audio_encoder import AudioEncoder
-from .text_encoder import EnglishTextEncoder, VietnameseTextEncoder
-from .ccmt import CascadedCrossModalTransformer
+from typing import Optional, Tuple
+from .components import PreNorm, FeedForward, CrossAttention, ScoringHead
 
 
-class MultiModalProjection(nn.Module):
-    """
-    Projects different modalities to a common dimension space
-    """
-    def __init__(self, input_dim, output_dim, dropout=0.1):
+class Attention(nn.Module):
+    """Multi-head self-attention mechanism from original CCMT"""
+    
+    def __init__(self, dim: int, heads: int = 8, dim_head: int = 64, dropout: float = 0.):
         super().__init__()
-        self.projection = nn.Sequential(
-            nn.Linear(input_dim, output_dim),
-            nn.LayerNorm(output_dim),
-            nn.GELU(),
+        inner_dim = dim_head * heads
+        project_out = not (heads == 1 and dim_head == dim)
+
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+
+        self.attend = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout(dropout)
+
+        self.to_kv = nn.Linear(dim, inner_dim * 2, bias=False)
+        self.to_q = nn.Linear(dim, inner_dim, bias=False)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim),
             nn.Dropout(dropout)
-        )
-    
-    def forward(self, x):
-        return self.projection(x)
+        ) if project_out else nn.Identity()
 
-
-class TokenSampler(nn.Module):
-    """
-    Samples fixed number of tokens from variable length sequences
-    """
-    def __init__(self, num_tokens=100, strategy="random"):
-        super().__init__()
-        self.num_tokens = num_tokens
-        self.strategy = strategy
-    
-    def forward(self, tokens, attention_mask=None, keep_cls=True):
+    def forward(self, x: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
         """
-        Sample fixed number of tokens from input
-        
         Args:
-            tokens: [batch_size, seq_len, hidden_dim]
-            attention_mask: [batch_size, seq_len], optional
-            keep_cls: whether to always keep the first token (CLS token)
-            
+            x: Key/Value source (batch, seq_len, dim)
+            q: Query source (batch, seq_len, dim)
         Returns:
-            sampled_tokens: [batch_size, num_tokens, hidden_dim]
+            Attended output (batch, seq_len, dim)
         """
-        batch_size, seq_len, hidden_dim = tokens.shape
-        
-        if seq_len <= self.num_tokens:
-            # If sequence is shorter, pad with zeros
-            padding = torch.zeros(
-                batch_size, 
-                self.num_tokens - seq_len, 
-                hidden_dim,
-                device=tokens.device,
-                dtype=tokens.dtype
-            )
-            return torch.cat([tokens, padding], dim=1)
-        
-        # Sample tokens
-        if self.strategy == "random":
-            if keep_cls and seq_len > 1:
-                # Always keep the first token (CLS)
-                cls_token = tokens[:, 0:1, :]  # [batch_size, 1, hidden_dim]
-                remaining_tokens = tokens[:, 1:, :]  # [batch_size, seq_len-1, hidden_dim]
-                
-                # Sample remaining tokens
-                num_remaining = self.num_tokens - 1
-                if remaining_tokens.shape[1] <= num_remaining:
-                    sampled_tokens = torch.cat([cls_token, remaining_tokens], dim=1)
-                else:
-                    # Random sampling
-                    indices = torch.randperm(remaining_tokens.shape[1])[:num_remaining]
-                    indices = indices.sort()[0]  # Sort to maintain some order
-                    sampled_remaining = remaining_tokens[:, indices, :]
-                    sampled_tokens = torch.cat([cls_token, sampled_remaining], dim=1)
-            else:
-                # Random sampling without preserving CLS
-                indices = torch.randperm(seq_len)[:self.num_tokens]
-                indices = indices.sort()[0]
-                sampled_tokens = tokens[:, indices, :]
-        else:
-            # Simply truncate
-            sampled_tokens = tokens[:, :self.num_tokens, :]
-        
-        return sampled_tokens
+        kv = self.to_kv(x).chunk(2, dim=-1)
+        k, v = map(lambda t: t.view(t.shape[0], t.shape[1], self.heads, -1).transpose(1, 2), kv)
+        q = self.to_q(q).view(q.shape[0], q.shape[1], self.heads, -1).transpose(1, 2)
+
+        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+
+        attn = self.attend(dots)
+        attn = self.dropout(attn)
+
+        out = torch.matmul(attn, v)
+        out = out.transpose(1, 2).contiguous().view(out.shape[0], out.shape[2], -1)
+        return self.to_out(out)
 
 
-class ESLCCMTModel(nn.Module):
+class Transformer(nn.Module):
+    """Transformer block from original CCMT with cross-attention"""
+    
+    def __init__(self, dim: int, depth: int, heads: int, dim_head: int, mlp_dim: int, dropout: float = 0.):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                PreNorm(dim, Attention(dim, heads=heads, dim_head=dim_head, dropout=dropout)),
+                PreNorm(dim, FeedForward(dim, mlp_dim, dropout=dropout))
+            ]))
+
+    def forward(self, x: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Key/Value tokens (batch, seq_len, dim)
+            q: Query tokens (batch, seq_len, dim)
+        Returns:
+            Transformed tokens (batch, seq_len, dim)
+        """
+        for attn, ff in self.layers:
+            x = attn(x, q) + x
+            x = ff(x) + x
+        return x
+
+
+class CascadedCrossModalTransformer(nn.Module):
     """
-    CCMT model adapted for ESL grading task
+    Main CCMT model adapted for English speaking scoring
+    Architecture: English Text -> Vietnamese Text -> Audio
     """
-    def __init__(self,
-                 # Audio encoder configs
-                 audio_model_id="facebook/wav2vec2-base-960h",
-                 # Text encoder configs  
-                 english_model_name="bert-base-uncased",
-                 vietnamese_model_name="vinai/phobert-base-v2",
-                 # CCMT configs
-                 common_dim=256,
-                 num_tokens_per_modality=100,
-                 ccmt_depth=6,
-                 ccmt_heads=8,
-                 ccmt_mlp_dim=1024,
-                 # Task-specific configs
-                 num_score_bins=21,  # 0 to 10 in 0.5 increments
-                 dropout=0.2):
+    
+    def __init__(
+        self,
+        # Task parameters
+        num_classes: int = 21,  # 0-10 in 0.5 increments  
+        task_type: str = "classification",  # or "regression"
+        
+        # Architecture parameters
+        num_patches: int = 300,  # Total tokens (100 per modality)
+        dim: int = 768,  # Token dimension (BERT-base size)
+        depth: int = 6,  # Transformer depth
+        heads: int = 8,  # Attention heads
+        mlp_dim: int = 2048,  # Feed-forward hidden dim
+        dim_head: int = 64,  # Dimension per attention head
+        dropout: float = 0.1
+    ):
         super().__init__()
         
-        self.common_dim = common_dim
-        self.num_tokens_per_modality = num_tokens_per_modality
-        self.num_score_bins = num_score_bins
+        # Validate input
+        assert num_patches % 3 == 0, "num_patches must be divisible by 3 for 3 modalities!"
+        self.patches_per_modality = num_patches // 3
+        self.dim = dim
+        self.task_type = task_type
         
-        # Initialize encoders
-        self.audio_encoder = AudioEncoder(
-            model_id=audio_model_id,
-            freeze_feature_encoder=False
+        # Positional embeddings for each modality
+        self.pos_embedding_english = nn.Parameter(
+            torch.randn(1, self.patches_per_modality, dim) * 0.02
+        )
+        self.pos_embedding_vietnamese = nn.Parameter(
+            torch.randn(1, self.patches_per_modality, dim) * 0.02
+        )
+        self.pos_embedding_audio = nn.Parameter(
+            torch.randn(1, self.patches_per_modality, dim) * 0.02
         )
         
-        self.english_text_encoder = EnglishTextEncoder(
-            model_name=english_model_name
+        # Two cascaded cross-modal transformers
+        # First: English (query) x Vietnamese (key/value) 
+        self.cross_tr_language = Transformer(
+            dim=dim, depth=depth, heads=heads, 
+            dim_head=dim_head, mlp_dim=mlp_dim, dropout=dropout
         )
         
-        self.vietnamese_text_encoder = VietnameseTextEncoder(
-            model_name=vietnamese_model_name
+        # Second: Multilingual text (query) x Audio (key/value)
+        self.cross_tr_speech = Transformer(
+            dim=dim, depth=depth, heads=heads,
+            dim_head=dim_head, mlp_dim=mlp_dim, dropout=dropout  
         )
         
-        # Projection layers to common dimension
-        self.audio_projection = MultiModalProjection(
-            self.audio_encoder.get_output_dim(),
-            common_dim,
-            dropout
+        # Classification/Regression head
+        self.scoring_head = ScoringHead(
+            dim=dim, num_classes=num_classes, 
+            task_type=task_type, dropout=dropout
         )
         
-        self.english_text_projection = MultiModalProjection(
-            self.english_text_encoder.get_output_dim(),
-            common_dim,
-            dropout
-        )
-        
-        self.vietnamese_text_projection = MultiModalProjection(
-            self.vietnamese_text_encoder.get_output_dim(),
-            common_dim,
-            dropout
-        )
-        
-        # Token samplers for each modality
-        self.token_sampler = TokenSampler(
-            num_tokens=num_tokens_per_modality,
-            strategy="random"
-        )
-        
-        # CCMT architecture
-        total_patches = num_tokens_per_modality * 3  # 3 modalities
-        self.ccmt = CascadedCrossModalTransformer(
-            num_classes=num_score_bins,
-            num_patches=total_patches,
-            dim=common_dim,
-            depth=ccmt_depth,
-            heads=ccmt_heads,
-            mlp_dim=ccmt_mlp_dim,
-            dropout=dropout
-        )
-        
-        # Task-specific head for regression
-        self.score_head = nn.Sequential(
-            nn.LayerNorm(common_dim),
-            nn.Linear(common_dim, common_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(common_dim // 2, num_score_bins)
-        )
-        
-    def forward(self, 
-                audio_chunks,
-                english_input_ids,
-                english_attention_mask,
-                vietnamese_input_ids,
-                vietnamese_attention_mask):
+        # Initialize weights
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize model weights"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of the CCMT model
+        Forward pass through CCMT
         
         Args:
-            audio_chunks: [batch_size, num_chunks, waveform_length]
-            english_input_ids: [batch_size, seq_len]
-            english_attention_mask: [batch_size, seq_len]
-            vietnamese_input_ids: [batch_size, seq_len]
-            vietnamese_attention_mask: [batch_size, seq_len]
-            
+            x: Concatenated tokens (batch, num_patches, dim)
+               Format: [english_tokens, vietnamese_tokens, audio_tokens]
         Returns:
-            Dictionary with logits, probabilities, and expected score
+            Predictions (batch, num_classes) or (batch, 1)
         """
-        batch_size = english_input_ids.shape[0]
-        device = english_input_ids.device
+        batch_size = x.shape[0]
         
-        # Encode each modality
-        # 1. Audio encoding
-        if audio_chunks is not None:
-            audio_features = self.audio_encoder(audio_chunks)  # [batch_size, num_chunks, audio_hidden_dim]
-            audio_features = self.audio_projection(audio_features)  # [batch_size, num_chunks, common_dim]
-            audio_tokens = self.token_sampler(audio_features, keep_cls=False)
-        else:
-            # Create dummy audio tokens if no audio
-            audio_tokens = torch.zeros(
-                batch_size, self.num_tokens_per_modality, self.common_dim,
-                device=device, dtype=torch.float32
-            )
+        # Split into modalities and add positional embeddings
+        english_tokens = x[:, :self.patches_per_modality] + self.pos_embedding_english
+        vietnamese_tokens = x[:, self.patches_per_modality:2*self.patches_per_modality] + self.pos_embedding_vietnamese  
+        audio_tokens = x[:, 2*self.patches_per_modality:] + self.pos_embedding_audio
         
-        # 2. English text encoding
-        english_hidden_states = self.english_text_encoder(
-            english_input_ids, english_attention_mask
-        )  # [batch_size, seq_len, english_hidden_dim]
-        english_features = self.english_text_projection(english_hidden_states)
-        english_tokens = self.token_sampler(
-            english_features, english_attention_mask, keep_cls=True
-        )
+        # First cascade: Language cross-attention
+        # English queries attend to Vietnamese keys/values
+        multilingual_tokens = self.cross_tr_language(vietnamese_tokens, english_tokens)
         
-        # 3. Vietnamese text encoding
-        vietnamese_hidden_states = self.vietnamese_text_encoder(
-            vietnamese_input_ids, vietnamese_attention_mask
-        )  # [batch_size, seq_len, vietnamese_hidden_dim]
-        vietnamese_features = self.vietnamese_text_projection(vietnamese_hidden_states)
-        vietnamese_tokens = self.token_sampler(
-            vietnamese_features, vietnamese_attention_mask, keep_cls=True
-        )
+        # Second cascade: Speech cross-attention  
+        # Multilingual queries attend to Audio keys/values
+        final_tokens = self.cross_tr_speech(audio_tokens, multilingual_tokens)
         
-        # Concatenate all modalities for CCMT
-        # Order: English text, Vietnamese text, Audio
-        multimodal_tokens = torch.cat([
-            english_tokens,      # [batch_size, num_tokens, common_dim]
-            vietnamese_tokens,   # [batch_size, num_tokens, common_dim] 
-            audio_tokens         # [batch_size, num_tokens, common_dim]
-        ], dim=1)  # [batch_size, 3*num_tokens, common_dim]
+        # Use first token (class token) for prediction
+        class_token = final_tokens[:, 0]  # (batch, dim)
         
-        # Apply CCMT
-        ccmt_output = self.ccmt(multimodal_tokens)  # [batch_size, num_classes]
+        # Generate predictions
+        predictions = self.scoring_head(class_token)
         
-        # Get logits and probabilities
-        logits = ccmt_output  # Already from classification head in CCMT
+        return predictions
+    
+    def get_attention_weights(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Extract attention weights for visualization
         
-        # For additional regression head, we can use the class token features
-        # Note: This is optional and can be removed if not needed
-        try:
-            if hasattr(self.ccmt, 'get_class_token_features'):
-                class_features = self.ccmt.get_class_token_features(multimodal_tokens)
-                additional_logits = self.score_head(class_features)
-                # Combine logits (you can experiment with different strategies)
-                logits = (logits + additional_logits) / 2
-        except Exception as e:
-            # If there's any issue with the additional head, just use CCMT output
-            pass
-        
-        # Convert to probabilities and expected score
-        probs = torch.softmax(logits, dim=-1)
-        
-        # Calculate expected score (0 to 10 in 0.5 increments)
-        score_bins = torch.linspace(0, 10, steps=self.num_score_bins, device=device)
-        expected_score = (probs * score_bins).sum(dim=-1)
-        
-        return {
-            'logits': logits,
-            'probs': probs,
-            'expected_score': expected_score,
-            'multimodal_features': multimodal_tokens
+        Args:
+            x: Input tokens (batch, num_patches, dim)
+        Returns:
+            language_attn: Attention weights from language cross-attention
+            speech_attn: Attention weights from speech cross-attention
+        """
+        # This would require modifying the Transformer class to return attention weights
+        # For now, return None as placeholder
+        return None, None
+    
+    def freeze_encoders(self):
+        """Freeze positional embeddings (encoders are external)"""
+        self.pos_embedding_english.requires_grad = False
+        self.pos_embedding_vietnamese.requires_grad = False  
+        self.pos_embedding_audio.requires_grad = False
+    
+    def unfreeze_encoders(self):
+        """Unfreeze positional embeddings"""
+        self.pos_embedding_english.requires_grad = True
+        self.pos_embedding_vietnamese.requires_grad = True
+        self.pos_embedding_audio.requires_grad = True
+
+
+# Factory function for easy model creation
+def create_ccmt_model(
+    task_type: str = "classification",
+    num_classes: int = 21,
+    model_size: str = "base"  # "base", "large"
+) -> CascadedCrossModalTransformer:
+    """
+    Factory function to create CCMT models with predefined configurations
+    
+    Args:
+        task_type: "classification" or "regression"
+        num_classes: Number of classes for classification
+        model_size: Model size configuration
+    Returns:
+        Configured CCMT model
+    """
+    configs = {
+        "base": {
+            "dim": 768,
+            "depth": 6, 
+            "heads": 8,
+            "mlp_dim": 2048,
+            "dim_head": 64
+        },
+        "large": {
+            "dim": 1024,
+            "depth": 8,
+            "heads": 12, 
+            "mlp_dim": 4096,
+            "dim_head": 64
         }
+    }
     
-    def save(self, path):
-        """Save model state"""
-        try:
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            
-            torch.save({
-                'model_state_dict': self.state_dict(),
-                'config': {
-                    'common_dim': self.common_dim,
-                    'num_tokens_per_modality': self.num_tokens_per_modality,
-                    'num_score_bins': self.num_score_bins
-                }
-            }, path)
-            print(f"Model saved successfully to {path}")
-        except Exception as e:
-            print(f"Error saving model: {e}")
+    config = configs.get(model_size, configs["base"])
     
-    @classmethod
-    def load(cls, path, **kwargs):
-        """Load model from checkpoint"""
-        try:
-            checkpoint = torch.load(path, map_location='cpu')
-            config = checkpoint.get('config', {})
-            
-            # Merge config with kwargs
-            config.update(kwargs)
-            
-            model = cls(**config)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            print(f"Model loaded successfully from {path}")
-            return model
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            raise
+    return CascadedCrossModalTransformer(
+        num_classes=num_classes,
+        task_type=task_type,
+        **config
+    )

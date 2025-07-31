@@ -1,0 +1,55 @@
+# Base Configuration for CCMT English Speaking Scoring
+# General project settings and data configuration
+
+# Project Information
+project_name: "ccmt_english_scoring"
+task_type: "classification"  # or "regression"
+num_classes: 21  # 0, 0.5, 1.0, ..., 10.0
+
+# Data Configuration
+data:
+  csv_path: "/media/gpus/Data/AES/ESL-Grading/data/PreprocessData/new_full_train_greaterthan3_removenoise.csv"
+  score_column: "grammar"  # "vocabulary", "grammar", "content"
+  test_size: 0.2
+  val_size: 0.1
+  random_state: 42
+
+# Audio Settings
+audio:
+  sample_rate: 16000
+  max_audio_length: 30.0  # seconds
+  normalize: true
+  remove_silence: false
+
+# Text Settings
+text:
+  max_text_length: 512
+  remove_repeats: true
+  remove_low_content: true
+  lowercase: true
+
+# Model Paths
+model_paths:
+  audio_encoder: "facebook/wav2vec2-base-960h"
+  english_encoder: "bert-base-uncased"
+  vietnamese_encoder: "vinai/phobert-base"  # or "bert-base-multilingual-cased"
+  translator: "Helsinki-NLP/opus-mt-en-vi"
+
+# Data Processing
+processing:
+  cache_translations: true
+  preload_audio: false
+  augmentation: true
+  max_tokens_per_modality: 100
+
+# Paths
+paths:
+  output_dir: "./outputs"
+  checkpoint_dir: "./outputs/checkpoints"
+  log_dir: "./outputs/logs"
+  cache_dir: "./cache"
+
+# Device Configuration
+device: "cuda"  # "auto", "cpu", "cuda"
+num_workers: 4
+pin_memory: true
