@@ -34,7 +34,7 @@ def parse_args():
                        help='Path to test CSV file')
     
     # Model configuration
-    parser.add_argument('--model_name', type=str, default='Alibaba-NLP/gte-multilingual-base',
+    parser.add_argument('--model_name', type=str, default='Alibaba-NLP/gte-Qwen2-1.5B-instruct',
                        help='Pretrained model name')
     parser.add_argument('--d_fuse', type=int, default=256,
                        help='Hidden dimension for fusion layers')
@@ -257,7 +257,7 @@ def inference_example():
     model.eval()
     
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained('Alibaba-NLP/gte-multilingual-base')
+    tokenizer = AutoTokenizer.from_pretrained('Alibaba-NLP/gte-Qwen2-1.5B-instruct')
     
     # Example texts for classification
     example_texts = [

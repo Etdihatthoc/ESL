@@ -94,29 +94,38 @@ def gaussian_soft_label(score, threshold=6.75, sigma=0.5):
     z = (score - threshold) / sigma
     return norm.cdf(z)  # P(class 1)
 
-def clean_dataframe(df, remove_low_content=True, filter_scores=True):
+def clean_dataframe(df, remove_low_content=True, filter_scores=True, remove_empty_audio_path=True):
     """
     Cleans the dataframe by processing the 'text' field:
     - Applies replace_repeats
     - Optionally removes rows with low content using is_low_content
+    - Optionally filters score columns ('grammar' or 'final') to [3.5, 10]
+    - Optionally removes rows with empty or missing 'audio_path' values
     """
     df = df.copy()
+    
+    # Clean text
     df['text'] = df['text'].apply(lambda t: replace_repeats(t, k=2, tag="[REPEAT]"))
     
+    # Remove low-content rows
     if remove_low_content:
         mask = ~df['text'].apply(is_low_content)
         df = df[mask].reset_index(drop=True)
     
+    # Filter based on score
     if filter_scores:
         score_column = 'grammar' if 'grammar' in df.columns else 'final'
-        # Keep scores between 3.5 and 10 for binary classification
         mask = (df[score_column] >= 3.5) & (df[score_column] <= 10)
         df = df[mask].reset_index(drop=True)
         print(f"After score filtering: {len(df)} samples")
         print(f"Score distribution: {df[score_column].value_counts().sort_index()}")
     
-    return df
+    # Remove rows with empty or missing audio_path
+    if remove_empty_audio_path:
+        mask = df['audio_path'].notna() & (df['audio_path'].astype(str).str.strip() != "")
+        df = df[mask].reset_index(drop=True)
 
+    return df
 
 def convert_score_to_group(score):
     """
