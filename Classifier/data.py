@@ -352,7 +352,7 @@ def create_data_loaders(train_path, val_path, test_path, tokenizer, batch_size=3
             batch_size=batch_size,
             sampler=train_sampler,
             collate_fn=collate_fn,
-            num_workers=40,
+            num_workers=10,
             pin_memory=True,
             persistent_workers=True
         )
@@ -362,7 +362,7 @@ def create_data_loaders(train_path, val_path, test_path, tokenizer, batch_size=3
             batch_size=batch_size,
             shuffle=True,
             collate_fn=collate_fn,
-            num_workers=40,
+            num_workers=10,
             pin_memory=True,
             persistent_workers=True
         )
@@ -372,7 +372,7 @@ def create_data_loaders(train_path, val_path, test_path, tokenizer, batch_size=3
         batch_size=batch_size,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=40,
+        num_workers=10,
         pin_memory=True,
         persistent_workers=True
     )

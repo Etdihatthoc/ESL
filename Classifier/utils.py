@@ -10,6 +10,7 @@ import os
 import random
 from datetime import datetime
 from transformers import get_cosine_schedule_with_warmup, get_linear_schedule_with_warmup
+import pynvml  # For GPU memory management
 
 
 def set_seed(seed=42):
@@ -277,3 +278,33 @@ def maybe_empty_cache(threshold=0.9):
                 print("Cleared CUDA cache")
         except Exception:
             torch.cuda.empty_cache()
+        
+def get_best_device():
+    if torch.cuda.is_available():
+        pynvml.nvmlInit()
+        device_count = pynvml.nvmlDeviceGetCount()
+
+        best_gpu = 0
+        max_free_mem = 0
+        gpu_index = 0 # This is used to track the GPU index, since PyTorch sees GPUs differently than NVML
+
+        for i in range(device_count):
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                name = pynvml.nvmlDeviceGetName(handle)
+                print(f"GPU {i}: {name}, Free memory: {mem_info.free // 1024**2} MB")
+
+                if mem_info.free > max_free_mem:
+                    max_free_mem = mem_info.free
+                    best_gpu = gpu_index
+                
+                gpu_index += 1
+            except pynvml.NVMLError as e:
+                print(f"[Warning] Skipping GPU {i}: {e}")
+
+        print(f"Using GPU: {best_gpu}")
+        return torch.device(f"cuda:{best_gpu}")
+    else:
+        print("CUDA not available, using CPU")
+        return torch.device("cpu")

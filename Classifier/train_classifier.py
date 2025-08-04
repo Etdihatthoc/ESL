@@ -7,6 +7,7 @@ import os
 import torch
 from transformers import AutoTokenizer
 import pandas as pd
+import pynvml  # For GPU memory management
 
 # Import our modules
 from data import create_data_loaders
@@ -15,7 +16,8 @@ from trainer import ESLBinaryTrainer, analyze_score_distribution
 from utils import (
     set_seed, setup_logging, count_parameters, get_optimizer, 
     get_scheduler, calculate_dataset_stats, create_model_config,
-    create_training_config, save_experiment_config, check_device_memory
+    create_training_config, save_experiment_config, check_device_memory,
+    get_best_device
 )
 
 
@@ -24,11 +26,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train ESL Binary Classifier')
     
     # Data paths
-    parser.add_argument('--train_path', type=str, default='./data/Full/Full_train.csv',
+    parser.add_argument('--train_path', type=str, default='../data/Full/Full_train.csv',
                        help='Path to training CSV file')
-    parser.add_argument('--val_path', type=str, default='./data/Full/val_pro.csv',
+    parser.add_argument('--val_path', type=str, default='../data/Full/val_pro.csv',
                        help='Path to validation CSV file')
-    parser.add_argument('--test_path', type=str, default='./data/Full/test_pro.csv',
+    parser.add_argument('--test_path', type=str, default='../data/Full/test_pro.csv',
                        help='Path to test CSV file')
     
     # Model configuration
@@ -46,7 +48,7 @@ def parse_args():
     # Training configuration
     parser.add_argument('--epochs', type=int, default=10,
                        help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=32,
+    parser.add_argument('--batch_size', type=int, default=8,
                        help='Batch size')
     parser.add_argument('--lr', type=float, default=2e-5,
                        help='Learning rate')
@@ -93,7 +95,6 @@ def parse_args():
     
     return parser.parse_args()
 
-
 def main():
     """Main training function"""
     args = parse_args()
@@ -109,7 +110,7 @@ def main():
     
     # Device setup
     if args.device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = get_best_device()
     else:
         device = args.device
     
@@ -245,7 +246,7 @@ def inference_example():
     """
     # Load the trained model
     model_path = './models/esl_binary_classifier_label_smoothing.pth'
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = get_best_device()
     
     if not os.path.exists(model_path):
         print(f"Model file not found: {model_path}")
