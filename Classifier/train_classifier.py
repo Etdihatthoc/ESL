@@ -34,7 +34,7 @@ def parse_args():
                        help='Path to test CSV file')
     
     # Model configuration
-    parser.add_argument('--model_name', type=str, default='Alibaba-NLP/gte-Qwen2-1.5B-instruct',
+    parser.add_argument('--model_name', type=str, default='Alibaba-NLP/gte-multilingual-base',
                        help='Pretrained model name')
     parser.add_argument('--d_fuse', type=int, default=256,
                        help='Hidden dimension for fusion layers')
@@ -82,7 +82,7 @@ def parse_args():
     # Output paths
     parser.add_argument('--output_dir', type=str, default='./results/binary_classifier',
                        help='Output directory for results')
-    parser.add_argument('--model_save_path', type=str, default='./models/esl_binary_classifier_label_smoothing.pth',
+    parser.add_argument('--model_save_path', type=str, default='./models/esl_binary_classifier_label_smoothing_save.pth',
                        help='Path to save the trained model')
     
     # Miscellaneous
@@ -105,7 +105,7 @@ def main():
     # Setup logging
     logger = setup_logging(
         log_dir=os.path.join(args.output_dir, 'logs'),
-        experiment_name='esl_binary_classifier_label_smoothing'
+        experiment_name='esl_binary_classifier_label_smoothing_save'
     )
     
     # Device setup
@@ -257,7 +257,7 @@ def inference_example():
     model.eval()
     
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained('Alibaba-NLP/gte-Qwen2-1.5B-instruct')
+    tokenizer = AutoTokenizer.from_pretrained('Alibaba-NLP/gte-multilingual-base')
     
     # Example texts for classification
     example_texts = [

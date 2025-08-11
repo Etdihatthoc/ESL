@@ -173,8 +173,9 @@ class ESLBinaryClassifier(nn.Module):
         for i in range(num_chunks):
             inp = audio[:, i, :].to(device)
             with torch.no_grad():
-                out = self.audio_encoder(input_values=inp).last_hidden_state
-                audio_encoder_out.append(out.mean(dim=1).detach().cpu())
+                with torch.amp.autocast('cuda'):
+                    out = self.audio_encoder(input_values=inp).last_hidden_state
+                    audio_encoder_out.append(out.mean(dim=1).detach().cpu())
 
             del inp, out
             gc.collect()
@@ -276,7 +277,7 @@ class ESLBinaryClassifier(nn.Module):
             'model_state_dict': self.state_dict(),
             'config': {
                 'pooling_dropout': self.pooling_dropout,
-                'regression_dropout': self.regression_dropout,
+                'classifier_dropout': self.classifier_dropout,
                 'model_name': self.encoder.config._name_or_path,
                 'avg_last_k': self.avg_last_k,
                 'd_fuse': self.d_fuse
@@ -290,7 +291,7 @@ class ESLBinaryClassifier(nn.Module):
         model = cls(
             model_name=config.get('model_name', 'Alibaba-NLP/gte-multilingual-base'),
             pooling_dropout=config.get('pooling_dropout', 0.3),
-            regression_dropout=config.get('regression_dropout', 0.5),
+            classifier_dropout=config.get('classifier_dropout', 0.5),
             avg_last_k=config.get('avg_last_k', 1),
             d_fuse=config.get('d_fuse', 256)
         )

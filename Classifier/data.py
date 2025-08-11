@@ -148,7 +148,7 @@ class ESLBinaryDataset(Dataset):
     """
     def __init__(self, dataframe, audio_processor=None, remove_low_content=True, 
                  num_chunks=10, chunk_length_sec=30, is_train=False):
-        dataframe = clean_dataframe(dataframe, remove_low_content, filter_scores=True)
+        dataframe = clean_dataframe(dataframe, remove_low_content, filter_scores=True, remove_empty_audio_path=True)
         self.audio_processor = audio_processor
         self.num_chunks = num_chunks
         self.chunk_length_sec = chunk_length_sec
