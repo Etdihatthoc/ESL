@@ -211,7 +211,7 @@ class ESLBinaryDataset(Dataset):
             'text': self.texts[idx],
             'group': torch.tensor(self.groups[idx], dtype=torch.long),
             'raw_score': torch.tensor(self.raw_scores[idx], dtype=torch.float32),
-            'soft_label': torch.tensor(self.soft_labels[idx], dtype=torch.float32),
+            'soft_labels': torch.tensor(self.soft_labels[idx], dtype=torch.float32),
             'question_type': self.question_types[idx]
         }
 

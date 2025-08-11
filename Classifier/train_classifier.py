@@ -70,7 +70,7 @@ def parse_args():
                        help='Alpha parameter for focal loss')
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                        help='Gamma parameter for focal loss')
-    parser.add_argument('--use_label_smoothing', action='store_true', default=False,
+    parser.add_argument('--use_label_smoothing', action='store_true', default=True,
                        help='Use label smoothing for loss calculation')
     
     # Data loading
@@ -82,7 +82,7 @@ def parse_args():
     # Output paths
     parser.add_argument('--output_dir', type=str, default='./results/binary_classifier',
                        help='Output directory for results')
-    parser.add_argument('--model_save_path', type=str, default='./models/esl_binary_classifier_label_smoothing_save.pth',
+    parser.add_argument('--model_save_path', type=str, default='./models/esl_binary_classifier_label_smoothing.pth',
                        help='Path to save the trained model')
     
     # Miscellaneous
@@ -105,7 +105,7 @@ def main():
     # Setup logging
     logger = setup_logging(
         log_dir=os.path.join(args.output_dir, 'logs'),
-        experiment_name='esl_binary_classifier_label_smoothing_save'
+        experiment_name='esl_binary_classifier_label_smoothing'
     )
     
     # Device setup
