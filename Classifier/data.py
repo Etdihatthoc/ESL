@@ -308,7 +308,7 @@ def binary_collate_fn(batch, tokenizer, max_length=8192):
     texts = [item['text'] for item in batch]
     groups = torch.stack([item['group'] for item in batch])
     raw_scores = torch.stack([item['raw_score'] for item in batch])
-    soft_labels = torch.stack([item['soft_label'] for item in batch])
+    soft_labels = torch.stack([item['soft_labels'] for item in batch])
     question_types = torch.tensor([item['question_type'] for item in batch], dtype=torch.long)
 
     encoded = tokenizer(
@@ -331,7 +331,7 @@ def binary_collate_fn(batch, tokenizer, max_length=8192):
         'attention_mask': encoded['attention_mask'],
         'group': groups,
         'raw_score': raw_scores,
-        'soft_label': soft_labels,
+        'soft_labels': soft_labels,
         'question_type': question_types,
         'audio': audios,
         'has_audio': has_audio
