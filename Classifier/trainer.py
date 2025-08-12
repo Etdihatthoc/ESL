@@ -48,10 +48,15 @@ class ESLBinaryTrainer:
         
         # Setup loss function
         if use_focal_loss:
-            from model import FocalLoss
-            self.criterion = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
+            if use_label_smoothing:
+                from model import FocalLossWithProbs
+                self.criterion = FocalLossWithProbs(alpha=focal_alpha, gamma=focal_gamma)
+            else:
+                from model import FocalLoss
+                self.criterion = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
             self.logger.info(f"Using Focal Loss with alpha={focal_alpha}, gamma={focal_gamma}")
         else:
+            # TODO: Implement label smoothing with CrossEntropyLoss
             # Use weighted cross entropy
             from model import get_class_weights
             class_weights = get_class_weights(train_dataset).to(device)

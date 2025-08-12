@@ -285,8 +285,8 @@ class ESLBinaryClassifier(nn.Module):
         }, path)
 
     @classmethod
-    def load(cls, path):
-        checkpoint = torch.load(path, map_location='cpu')
+    def load(cls, path, device="cpu"):
+        checkpoint = torch.load(path, map_location=device)
         config = checkpoint['config']
         model = cls(
             model_name=config.get('model_name', 'Alibaba-NLP/gte-multilingual-base'),
@@ -296,9 +296,33 @@ class ESLBinaryClassifier(nn.Module):
             d_fuse=config.get('d_fuse', 256)
         )
         model.load_state_dict(checkpoint['model_state_dict'])
+        model.to(device)
         return model
-  
 
+class FocalLossWithProbs(nn.Module):
+    def __init__(self, alpha=1.0, gamma=2.0, reduction='mean'):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        """
+        inputs: [batch, num_classes] raw logits
+        targets: [batch, 1] probabilities for true class (soft labels)
+        """
+        targets = targets.float()
+        pos_logits = inputs[:, 1] - inputs[:, 0]  
+        bce_loss = F.binary_cross_entropy_with_logits(pos_logits, targets, reduction='none')
+        pt = torch.exp(-bce_loss)  # still the prob of the "true" class, even if soft
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
 
 class FocalLoss(nn.Module):
     """

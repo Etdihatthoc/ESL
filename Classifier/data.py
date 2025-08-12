@@ -92,7 +92,8 @@ def gaussian_soft_label(score, threshold=6.75, sigma=0.5):
     centered at the threshold.
     """
     z = (score - threshold) / sigma
-    return norm.cdf(z)  # P(class 1)
+    cdf = norm.cdf(z)  # P(class 1)
+    return cdf  # [P(class 0), P(class 1)]
 
 def clean_dataframe(df, remove_low_content=True, filter_scores=True, remove_empty_audio_path=True):
     """

@@ -64,7 +64,7 @@ def parse_args():
                        help='Type of optimizer')
     
     # Loss function
-    parser.add_argument('--use_focal_loss', action='store_true',
+    parser.add_argument('--use_focal_loss', action='store_true', default=True,
                        help='Use focal loss instead of weighted cross entropy')
     parser.add_argument('--focal_alpha', type=float, default=1.0,
                        help='Alpha parameter for focal loss')
